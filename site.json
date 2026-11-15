@@ -1,18 +1,18 @@
 {
   "_说明": "整站的名字、简介、导航、强调色都在这一个文件里改；改完跑一次 python3 build.py。",
-  "brand": "SUYZZ.WORKS",
-  "wordmark_solid": "SUYZZ",
-  "wordmark_hollow": ".WORKS",
-  "claim": "示例：把系统跑起来，再把它讲清楚",
-  "bio": "示例简介。这里放文章、实验记录和一个越写越大的知识库。编号按发布顺序排。",
-  "motto": "示例座右铭，一行就够。",
-  "tagline": "示例：一个人的系统记录与知识库",
+  "brand": "SuYzz",
+  "wordmark_solid": "SuYzz",
+  "wordmark_hollow": ".LOG",
+  "claim": "自己的机器，自己的模型，自己的记录",
+  "bio": "Linux、本地大模型和界面的折腾记录，外加一个越写越大的知识库。文章按发布顺序编号。",
+  "motto": "先能跑，再跑得快，最后讲得清。",
+  "tagline": "SuYzz 的记录站：本地大模型、Linux 运维和界面",
   "variant": "site",
   "_variant说明": "强调风格：site=琥珀黄+暖纸+大切角 / standard=正黄+中性纸 / coldstore=冰蓝+冷纸+密网格 / nightshift=青柠+深色。也可以临时试：index.html?variant=coldstore",
   "since": "2026-11-01",
   "_since说明": "建站日期，首页那个“第 N 天”就是用它算的真数字。",
   "base": "https://suyzz.github.io",
-  "_base说明": "上线后改成你自己的域名（或 xxx.github.io），站点地图和分享链接要用到。",
+  "_base说明": "上线后改成你自己的地址（或 xxx.github.io），站点地图要用到。",
   "domain": "",
   "head_extra": "",
   "_head_extra说明": "要加统计代码、favicon、分享图，写在这一行里（一段 HTML）。",
@@ -20,14 +20,13 @@
     { "name": "Linux 与服务器运维", "level": "主力" },
     { "name": "本地大模型部署与调优", "level": "主力" },
     { "name": "故障排查与性能定位", "level": "熟练" },
-    { "name": "柜面业务与运营流程", "level": "在岗" },
     { "name": "界面与前端", "level": "够用" },
     { "name": "脚本与数据处理", "level": "够用" }
   ],
   "_skills说明": "首页和关于页的技能清单。level 用词就行，别编数字——这套风格要求数字必须是真的。",
   "links": [
     { "key": "邮箱", "name": "示例@example.com", "url": "mailto:示例@example.com" },
-    { "key": "GITHUB", "name": "github.com/你的用户名", "url": "https://github.com/" },
-    { "key": "微信", "name": "示例：微信号", "url": "#" }
+    { "key": "GITHUB", "name": "github.com/SuYzz", "url": "https://github.com/" },
+    { "key": "微信", "name": "可私信", "url": "#" }
   ]
 }
