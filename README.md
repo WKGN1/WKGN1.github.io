@@ -28,6 +28,7 @@ git add -A && git commit -m "写一篇" && git push    # 推到 GitHub 自动上
 | 整套外观规则（颜色、切角、动效曲线） | `assets/endfield.css` 和 `assets/tokens.json` |
 | 某一种页面的骨架 | `templates/home.html`（首页）、`templates/doc.html`（文章）、`templates/list.html`（列表）、`templates/about.html`（关于）、`templates/base.html`（公共头尾） |
 | 统计代码、favicon、分享图 | `site.json` 里 `"head_extra"`，写一段 HTML |
+| 文章里插图 | 图片放 `content/img/`，文章里写 `![说明](img/文件名.png)`，构建时自动拷过去 |
 
 ## 页面上那些数字
 

@@ -351,6 +351,14 @@ def main():
     for p in (ROOT / "assets" / "contours").glob("*"):
         shutil.copy2(p, out / "assets" / "contours" / p.name)
 
+    # 图片放 content/img/，会自动拷到 dist/img/，文章里写 ![说明](img/xxx.png) 就能显示
+    imgs = ROOT / "content" / "img"
+    if imgs.is_dir():
+        (out / "img").mkdir(parents=True, exist_ok=True)
+        for p in imgs.iterdir():
+            if p.is_file():
+                shutil.copy2(p, out / "img" / p.name)
+
     write(out / "index.html", home(conf, docs, posts, notes, stats, built))
     write(out / "posts.html", list_page(conf, posts, stats, "posts", "全部文章", "Posts / Records"))
     write(out / "kb.html", list_page(conf, notes, stats, "notes", "知识库", "Knowledge / Notes"))
