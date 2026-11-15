@@ -1,0 +1,25 @@
+<!doctype html>
+<!-- 全站骨架。外观来自 endfield.css，布局来自 site.css，名字和内容来自 site.json。 -->
+<html lang="zh-CN" data-ef-variant="{{VARIANT}}">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{TITLE}}</title>
+    <meta name="description" content="{{DESC}}" />
+    <script>try{var t=localStorage.getItem('theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;}catch(e){}if(/[?&]noanim/.test(location.search))document.documentElement.dataset.noanim='1';try{var q=new URLSearchParams(location.search);if(q.get('theme')==='dark'||q.get('theme')==='light')document.documentElement.dataset.theme=q.get('theme');}catch(e){}</script>
+    <script src="{{ASSETS}}variant.js"></script>
+    <link rel="stylesheet" href="{{ASSETS}}endfield.css" />
+    <link rel="stylesheet" href="{{ASSETS}}site.css" />
+    {{HEAD_EXTRA}}
+  </head>
+  <body class="ef ef-contours">
+    <div class="ef-tri ef-in-sweep" aria-hidden="true"><i></i><i></i><i></i></div>
+{{BODY}}
+    <script type="module">
+      import { wireReadouts, wireTheme, wireParallax } from '{{ASSETS}}fx.js';
+      wireReadouts();
+      wireTheme();
+      wireParallax(document.querySelector('[data-hero]'));
+    </script>
+  </body>
+</html>

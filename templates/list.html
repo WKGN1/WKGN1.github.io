@@ -1,0 +1,25 @@
+    <div class="shell">
+{{RAIL}}
+      <article class="ef-spread">
+        <div class="ef-sheet">
+          <p class="ef-eyebrow slash">{{EYEBROW}}</p>
+          <h1 class="ef-bar-title">{{TITLE}}<span class="ef-field">{{N}}</span></h1>
+{{BLOCKS}}
+        </div>
+        <aside class="ef-margin" aria-label="按时间与分类">
+          <div class="toc">
+            <h2 class="margin-h ef-field">按月份</h2>
+            <ol>
+{{MONTHS}}
+            </ol>
+            <h2 class="margin-h ef-field">每个分类的字数</h2>
+            <ul class="ef-ledger">
+{{TOTALS}}
+            </ul>
+            <p class="ef-actions" style="margin-top:1.5rem">
+              <button class="ef-btn small" type="button" data-theme-toggle>切换深浅</button>
+            </p>
+          </div>
+        </aside>
+      </article>
+    </div>

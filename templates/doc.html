@@ -1,0 +1,43 @@
+    <div class="shell">
+{{RAIL}}
+      <article class="ef-spread">
+        <div class="ef-sheet">
+          <p class="ef-eyebrow slash">{{EYEBROW}}</p>
+          <p class="ef-crumb ef-field"><a href="{{CRUMB_LINK}}">{{CRUMB_TEXT}}</a><span>{{CAT}}</span></p>
+          <p class="ids">
+            <a class="ef-tag is-current" href="index.html">No.{{NO}}</a>
+            <a class="ef-kv" href="{{CRUMB_LINK}}"><span>分类</span><span>{{CAT}}</span></a>
+          </p>
+          <ul class="ef-facts ef-field">
+            <li><time>{{DATE}}</time></li>
+{{UPD}}
+            <li>{{WORDS}} 字</li>
+            <li>{{READ}}</li>
+          </ul>
+          <h1 class="title ef-read">{{TITLE}}</h1>
+          <div class="ef-tri" aria-hidden="true"><i></i><i></i><i></i></div>
+{{LEDE}}
+          <div class="ef-prose">
+{{BODY}}
+          </div>
+          <p class="ef-actions" style="margin-top:2.5rem">{{PREV}}{{NEXT}}
+            <button class="ef-btn small" type="button" data-theme-toggle>切换深浅</button></p>
+{{RELATED}}
+        </div>
+
+        <aside class="ef-margin" aria-label="目录与统计">
+          <div class="toc">
+{{TOC}}
+            <h2 class="margin-h ef-field">按分类</h2>
+            <ul class="ef-ledger">
+{{CATS}}
+              <li><span>总字数</span><span class="ef-field">{{TOTALWORDS}}</span></li>
+            </ul>
+            <h2 class="margin-h ef-field">标签</h2>
+            <ul class="ef-ledger">
+{{TAGS}}
+            </ul>
+          </div>
+        </aside>
+      </article>
+    </div>
