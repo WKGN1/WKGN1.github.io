@@ -4,6 +4,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- 字体提前拉：拉得晚就会先用系统字体画一遍再换过来，数字滚动时宽度会跟着跳一下 -->
+    <link rel="preload" as="font" crossorigin href="{{ASSETS}}Saira.ttf" />
     <title>{{TITLE}}</title>
     <meta name="description" content="{{DESC}}" />
     <script>try{var t=localStorage.getItem('theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;}catch(e){}if(/[?&]noanim/.test(location.search))document.documentElement.dataset.noanim='1';try{var q=new URLSearchParams(location.search);if(q.get('theme')==='dark'||q.get('theme')==='light')document.documentElement.dataset.theme=q.get('theme');}catch(e){}</script>

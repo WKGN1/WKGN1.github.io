@@ -75,6 +75,13 @@
   align-items: center; gap: clamp(1.5rem, 5vw, 4rem);
   padding: clamp(1.75rem, 4vw, 3rem) var(--ef-pad);
 }
+/* 数字滚动期间不许把旁边的文字推走：先要等宽数字（字体还没下载完时，系统字体的
+   数字宽窄不一，一换字形整行就像在抖），fx.js 那边再把这一栏的宽度整个占住。 */
+[data-fx], [data-fx-load] { font-variant-numeric: tabular-nums lining-nums; }
+/* 大数字那一栏先按位数把宽度钉死（编号是 build.py 的 %03d，固定三位）：滚数字时
+   字形宽窄一变，右边整段正文就被推来推去，手机上看着像整行在抖、很难读。字体还没
+   下载完、先被系统字体顶着的时候最容易犯，所以宽度不能跟着字形走。 */
+.latest .ef-hollow-no { min-width: 3ch; max-width: 3ch; text-align: center; }
 .latest .body { display: flex; flex-direction: column; align-items: flex-start; gap: 0.9rem; max-width: 44rem; }
 .latest .title { font-size: clamp(1.6rem, 3.4vw, 2.6rem); font-weight: 800; line-height: 1.2; margin: 0; }
 .latest .flag { padding: 0.05em 0.6em; background: var(--ef-signal); color: var(--ef-on-signal); font-weight: 700; }

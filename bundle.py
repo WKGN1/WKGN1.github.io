@@ -40,6 +40,7 @@ def bundle(src, dst, note):
     css = inline_css((A / "endfield.css").read_text(encoding="utf-8") + "\n" + (A / "site.css").read_text(encoding="utf-8"))
     html = re.sub(r'\s*<link rel="stylesheet" href="assets/endfield.css" />', "", html)
     html = re.sub(r'\s*<link rel="stylesheet" href="assets/site.css" />', "", html)
+    html = re.sub(r'\s*<link rel="preload" as="font"[^>]*/>', "", html)
     html = html.replace("</head>", "    <style>\n%s\n    </style>\n  </head>" % css, 1)
     html = re.sub(r'\s*<script src="assets/variant.js"></script>', "", html)
     html = html.replace("</head>", "    <script>\n%s\n    </script>\n  </head>" % inline_js((A / "variant.js").read_text(encoding="utf-8")), 1)

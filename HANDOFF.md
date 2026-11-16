@@ -165,3 +165,18 @@ curl -s -o /dev/null -w "%{http_code}\n" https://wkgn1.github.io/    # 期望 20
 - 已实测排除"宽度把正文挤来挤去"这个猜测：`themetest.py` 生成的 `t-nojit.html` 里把大数字逐个换成 000…999 并量宽度和正文左边界 —— **数字宽 282.2→282.2（差 0px）、正文左边抖 0px**，Saira 的数字本来就是等宽的；顶部那几个计数（15 / 4 / 2 / 717）自身宽差也是 0px。所以正文没有被挤动，问题在数字自己滚动的观感上。
 - 涉及代码：`templates/home.html` 的 `.latest` 块（`data-fx-host` + 大数字上的 `data-fx`，鼠标进入/获得焦点时 `fx.js` 的 `wireReadouts` 会让 `data-fx` 的数字滚一遍，逐位从左到右锁死，600ms）；观感细节在 `assets/fx.js` 的 `scramble()`。
 - 2026-11-16 16:22 状态：已把三种改法发给用户选，等他回哪个（不滚 / 只滚末位快一点、前面的立刻锁住 / 整块文字也别带滚动）。**改之前别自己猜着动 fx.js**。
+
+## 十五、2026-11-16 20:40 「003 那条文字跟着抖」查清并修好
+
+- 用户澄清：不是数字好不好看的问题，是**数字后面的正文位置被拽着动**，抖得看不清。
+- 真因（定格实测出来的，不是猜的）：数字滚动时随机字形宽度不一致，而这一栏是 CSS Grid 的 `auto` 轨道，宽度跟着字形走 → 右边正文整段被推走。最容易犯的时机是 **Saira 字体还没下载完、先用系统字体顶着**（系统字体的数字不等宽），`font-variant-numeric: tabular-nums` 对没有 tnum 特性的字体不起作用。
+  - 修复前实测：数字宽 282.2→312（差 29.8px），正文左边 386.2→416（**抖 29.8px**）。
+- 改动：
+  1. `assets/site.css`：`[data-fx], [data-fx-load] { font-variant-numeric: tabular-nums lining-nums; }`，并且把大数字那一栏**按位数钉死**——`.latest .ef-hollow-no { min-width: 3ch; max-width: 3ch; text-align: center; }`（编号是 build.py 的 `%03d`，永远三位，所以 3ch 安全）。宽度从此不跟字形走。
+  2. `templates/base.html`：加 `<link rel="preload" as="font" crossorigin href="{{ASSETS}}Saira.ttf">`，让字体早点下载，别在滚动滚到一半的时候才换字体（换了 `ch` 会重算，会抖最后那一下）。
+  3. `assets/fx.js`：`scramble()` 里加了宽度占位 `pinWidth()/pinRelease()`（量一次最终宽度，滚动期间用内联 min/max-width 锁死，滚完释放）——单测证明函数本身有效（克隆上调 `scramble()` 后内联 `min=max=360px`）。
+  4. `bundle.py`：单文件预览里把这条 preload 去掉（预览里字体已经内联成 data:，留着只是白报一个 404）。
+- 修复后实测（同一套定格法，9 帧）：**数字宽 384.95→385（差 0.05px），正文抖 0.05px**；GIF 九帧里右列正文的起始位置一帧都没挪。字体状态 `Saira 可用=true`（preload 起效）。29.8px → 0.05px。
+- 还没查清的一件事（诚实记着）：hover 触发的真实滚动路径上，逐帧读 `realNo.style.minWidth` 是空的（占位没挂上），但同一份 fx.js 里直接调 `scramble()` 是会挂上的。目前宽度稳定是靠 CSS 的 `3ch` + preload 做到的，占位函数算第三层保险。要接着深挖就从 `wireReadouts` 的 `run()` 那条链查。
+- 工具：`/home/suyzz/blogshot/filmgif.py` —— 把 fx.js 真跑起来、按 t=0/60/…/600ms 逐帧定格成 GIF，同时在页面顶部打印"数字宽 / 正文位移 / 每帧字符 / 字体就绪状态 / 占位内联值"。要点：**每次用全新 Firefox profile**，否则 `assets/*.js|css` 会被缓存住，改动看着像没生效（这次就这么被骗过一回）。
+- 规矩：**加任何"数字滚动/计数器"类效果，先占位再滚**（`ch` 或内联锁宽），并且配套 `python3 check-es.py` 与 filmgif 实测；别在只改 CSS 的情况下宣称"不抖了"。

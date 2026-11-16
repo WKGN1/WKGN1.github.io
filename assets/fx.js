@@ -46,6 +46,7 @@ export function scramble(el, ms = 360) {
   if (!/[0-9A-Za-z]/.test(final)) return;
   const labelled = before ? before.labelled : el.hasAttribute('aria-label');
   if (!labelled) el.setAttribute('aria-label', final.trim());
+  pinWidth(el);                       // 见下面 pinWidth 的注释：不占位会把旁边的文字推着走
   const started = performance.now();
   const state = { nodes, labelled, frame: 0 };
   running.set(el, state);
@@ -61,10 +62,38 @@ export function scramble(el, ms = 360) {
     else {
       for (const x of nodes) x.n.data = x.final;
       if (!labelled) el.removeAttribute('aria-label');
+      pinRelease(el);
       running.delete(el);
     }
   };
   state.frame = requestAnimationFrame(step);
+}
+
+// 数字滚的时候必须先把位子占死。原因：随机字形宽度各不相同（尤其字体还没下载完、
+// 先用系统字体顶着的时候），数字一换，它自己那一栏就变宽变窄，右边的文字被推来推去，
+// 手机上看着像整行在震动，很难读。这里量一次最终宽度，滚动期间锁死，滚完再放开。
+const pinOpen = new WeakMap();
+
+function pinWidth(el) {
+  const held = pinOpen.get(el);
+  if (held) return held;
+  const prev = { display: el.style.display, min: el.style.minWidth, max: el.style.maxWidth };
+  el.style.display = 'inline-block';  // 行内元素不认 min/max-width，先给它变成块
+  const w = Math.ceil(el.getBoundingClientRect().width);
+  el.style.minWidth = w + 'px';
+  el.style.maxWidth = w + 'px';
+  const pin = { w, display: prev.display, min: prev.min, max: prev.max };
+  pinOpen.set(el, pin);
+  return pin;
+}
+
+function pinRelease(el) {
+  const pin = pinOpen.get(el);
+  if (!pin) return;
+  pinOpen.delete(el);
+  el.style.display = pin.display;
+  el.style.minWidth = pin.min;
+  el.style.maxWidth = pin.max;
 }
 
 // On open, readouts settle one after another; the whole run stays under a
