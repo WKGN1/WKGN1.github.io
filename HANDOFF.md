@@ -113,7 +113,7 @@ curl -s -o /dev/null -w "%{http_code}\n" https://wkgn1.github.io/    # 期望 20
 
 ## 十一、本轮收尾时留下的事（下一个会话请先处理）
 
-1. **推送权限需要恢复**（两选一，都让用户在手机上点几下）：
+1. **推送权限需要恢复**（**2026-11-16 15:00 已解决**：用户在仓库 UI 手动加了部署密钥，Title `blog`，勾了 write；实测 `git push origin main` 成功、Actions #4 success。以后撤销 token 不会再带走这把钥匙）：
    - 办法 1（推荐，之后不依赖 token）：用户打开 `https://github.com/WKGN1/WKGN1.github.io/settings/keys` → **Add deploy key** → Title 填 `blog`，Key 粘贴这串公钥 → **务必勾上 Allow write access** → Add key：
 
      `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMqAlC683hEwNXNDkBT+k/c0pTM0/jrwL/xLJ9QvwdBd blog-deploy`
@@ -123,6 +123,20 @@ curl -s -o /dev/null -w "%{http_code}\n" https://wkgn1.github.io/    # 期望 20
      `GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519" git push origin main`
 
    - 办法 2（最省事）：让用户再发一串 token（classic，勾 repo + workflow），用它 POST `/repos/WKGN1/WKGN1.github.io/keys`（body 里带 `"admin": true`）把上面这串公钥加回去；**提醒他这串 token 先别撤销**，否则又会把密钥一起删掉。
-2. **有一个提交没推上去**：`444439a 加交接说明 HANDOFF.md`（线上站点对应 `d3be956`，两者页面内容相同，只是仓库里缺这份交接说明）。恢复推送权限后先 `git push`，并确认 Actions 构建 success。
+2. **有一个提交没推上去**（**已解决**：`444439a` 与 `1f6e9f6` 已于 15:00 推送，Actions 运行 #4 success，远端 HEAD 现为 `1f6e9f6`）。
 3. **交接包**：`博客交接-20261116.zip` —— 含全部源码 + `.git`（完整历史与 remote 配置），不含 `dist/`（用 `python3 build.py` 现场生成）。解压到任意目录，`cd` 进去干活。
 4. 用户只想看效果时直接给线上地址：`https://wkgn1.github.io`（深色 `?theme=dark`，换配色 `?variant=coldstore`）。要发照片就用本机 Firefox 无头截图（snap 版 Firefox 只能往 `~/snap/firefox/common/` 里写文件，且要带 `--no-remote --profile /home/suyzz/snap/firefox/common/ffprof`）。
+
+## 十二、2026-11-16 15:00 自检结果（本轮实测，不是推测）
+
+- 线上正常：`/`、`posts.html`、`about.html`、`kb.html`、`sitemap.xml`、中文文件名文章页（percent-encode 后）全 200；`assets/site.css` 200。
+- 本地 `python3 build.py` 正常：8 页面 / 文章 2 / 笔记 2 / 717 字。
+- 截图实拍（浅色、深色、400px 窄屏）排版都正常：合成图 `线上自检-20261116.png` 在 `/home/suyzz/blogshot/`（截图临时文件在 `~/snap/firefox/common/tmp/`）。
+- **实测缺失（给用户列过的待办依据）**：`favicon.ico` 404、`robots.txt` 404、`feed.xml`/`rss.xml` 404、`404.html` 404（走 GitHub 默认页）；`site.json` 的 `head_extra` 为空 → 无统计、无 favicon、无分享图；页面 head 里没有任何 `og:`/`twitter:` 标签 → 分享到微信/QQ 没有卡片。
+- 内容侧待确认：`site.json` 的 links 里邮箱还是 `示例@example.com`（公开可见）；`content/img/` 是空的（文章零插图）。
+- 性能待办：`assets/Saira.ttf` 476KB 整包下发（`font-display: swap` 已有，中文走系统字体不受影响）；可切 woff2 + 拉丁子集，约省 400KB。
+- 顺带可清理：`assets/tokens.json`（12KB）构建后运行时不需要（`variant.js` 里只是注释提到），目前仍被发布到线上。
+- 遗留进程：`python3 -m http.server 8088 --bind 0.0.0.0 --directory <项目>/dist` 仍在跑（局域网可访问，pid 当时是 400176）；外网 localhost.run 隧道已断，不再需要。
+- 备份：`/home/suyzz/blogshot/博客交接-20261116.zip`（含 `.git` 完整历史，不含 `dist/`）。
+- 版本一致性：本机 Python 3.14.4，CI 固定 3.11（本机没有 3.11，改动后按 3.11 兼容写法来过一遍再推）。
+
