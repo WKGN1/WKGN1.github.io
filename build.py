@@ -365,7 +365,9 @@ def main():
     write(out / "about.html", about_page(conf, docs, stats))
     for d in docs:
         write(out / link(d), doc_page(conf, d, docs, stats))
-    (out / "CNAME").write_text(conf.get("domain", ""), encoding="utf-8")
+    dom = (conf.get("domain") or "").strip()
+    if dom:
+        (out / "CNAME").write_text(dom + "\n", encoding="utf-8")
     (out / "sitemap.xml").write_text(
         '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
         + "".join('<url><loc>%s/%s</loc></url>\n' % (conf["base"].rstrip("/"), p)
