@@ -180,3 +180,50 @@ curl -s -o /dev/null -w "%{http_code}\n" https://wkgn1.github.io/    # 期望 20
 - 还没查清的一件事（诚实记着）：hover 触发的真实滚动路径上，逐帧读 `realNo.style.minWidth` 是空的（占位没挂上），但同一份 fx.js 里直接调 `scramble()` 是会挂上的。目前宽度稳定是靠 CSS 的 `3ch` + preload 做到的，占位函数算第三层保险。要接着深挖就从 `wireReadouts` 的 `run()` 那条链查。
 - 工具：`/home/suyzz/blogshot/filmgif.py` —— 把 fx.js 真跑起来、按 t=0/60/…/600ms 逐帧定格成 GIF，同时在页面顶部打印"数字宽 / 正文位移 / 每帧字符 / 字体就绪状态 / 占位内联值"。要点：**每次用全新 Firefox profile**，否则 `assets/*.js|css` 会被缓存住，改动看着像没生效（这次就这么被骗过一回）。
 - 规矩：**加任何"数字滚动/计数器"类效果，先占位再滚**（`ch` 或内联锁宽），并且配套 `python3 check-es.py` 与 filmgif 实测；别在只改 CSS 的情况下宣称"不抖了"。
+
+## 十六、2026-11-17 01:30 补齐基础件：图标 / 404 页 / robots / RSS / 分享卡片，并把 hover 撞车查到底
+
+### 做了什么（build.py 还是零依赖，新工具只在改动它们自己时才跑）
+
+1. **favicon**：形状是"右上角切角的深色方块 + 三条琥珀横杠 + 一个小方块"，站内"记录清单"那几行的压缩版（深色底是为了在浅色和深色标签栏都看得见）。
+   - 生成器：`python3 favicon.py`（**要 Pillow，build.py 不用它**）→ `assets/favicon.svg`、`assets/favicon-32.png`、`assets/apple-touch-icon.png`、`static/favicon.ico`。
+   - 要换样子只改 favicon.py 里的 `BADGE / BARS / TAG / FIELD` 和两个颜色再重跑，**别手改生成物**（SVG 和 PNG 都由那一份几何出来）。
+   - 新规矩：**`static/` 里的文件原样进 `dist/` 根**（favicon.ico 这类"客户端直接去根上取"的文件放这里，爬虫不读 `<link>` 也能拿到）。
+2. **404 页**：`build.py` 的 `not_found()` + `templates/404.html`。这一页可能在**任意深层地址**下被打开，所以资源和链接一律从站点根走（`/assets/…`、`/posts.html`）：靠 `page(..., root_rel=True)` 和 `rail(..., root_rel=True)`。以后再加"会在深层路径下被服务"的页面，同样处理，否则 CSS 会 404 成一张白板。
+3. **robots.txt**（`robots_txt()`）、**feed.xml**（`rss_feed()`：RSS 2.0；草稿不进订阅；description 是纯文本（先把标签去掉再把实体还原，别把 `&amp;` 二次转义）；分类和标签重名要去过再发；时间带 +0800）。
+4. **head 里加的东西**（都在 `templates/base.html`，值由 `page()` 填）：图标三条、RSS 声明、`canonical`、`og:`/`twitter:`（含 1200×630 的 `og:image`），文章页另有 `article:published_time` / `article:tag`。首页的 canonical/og:url 就是站点根，**不挂 index.html**（同一页两个地址会被当重复内容）。地址一律 `abs_url()` 走 percent-encode（文章名是中文）。
+5. **分享卡片**：画板 `templates/sharecard.html`（**不发布**，只有工具用它）+ `python3 sharecard.py` → `assets/share-card.png`。默认深色，`--theme light` 出浅色版；也可以在 `site.json` 里写 `card_theme`。**卡片页必须带 `variant.js`**，否则强调色退回默认正黄而不是琥珀（第一版就是这个错）。卡片上的数字来自 build 现算，别写死。
+6. `assets/tokens.json` **不再发布**（运行时没人读，12KB）：`build.py` 里的 `NO_PUBLISH = {"tokens.json"}`。
+7. sitemap：草稿不再进去，地址 percent-encode。
+8. `bundle.py`：离线单文件预览里把图标 / apple-touch / RSS 声明的链接剥掉（和之前剥字体 preload 同理——包里没这些文件，留着只是白抓一次 404）。
+
+### hover 撞车（第 14 节那条投诉的延续，这次查到底了）
+
+- 现象：鼠标进"最新"那一行，右边的正文被整段拽着走。
+- 真因（逐帧定格实测，不是猜的）：`wireReadouts` 开场那串 `setTimeout` 没留住 handle，hover 时 `run()` 又把开场滚动放了一遍（所以 003 会"滚完又回头滚"）；而 `cancelAnimationFrame` 之后的状态是"正在跑但没有占位宽度"——占位要到下一次 `scramble()` 才挂上，于是这一栏宽度先跟着随机字形乱缩（实测 **-34px**：120.5 → 86.5），正文被推过去 26.3px。fx.js 修好之前整块模块没执行，这条从来没露过头。
+- 修法：`run()` 里**先 `clearTimeout` 掉开场 timer（并清零）再滚**。`pinWidth()` 的测量**保留**（实测滚之前 measured==rendered：86.5→86.5，`pinW/pinInline` 也确实是同一个值），CSS 的 `min/max-width:3ch` **也别删**（Saira 加载失败时 `ch` 是唯一防线）。
+- 实测：修完 hover 帧宽 84.4 / 90.3 / 113.7 / **120.5** / 120.5，全程不回缩，每帧 `pinInline` 都挂着；`check-es.py` PASS。证据 GIF：`/home/suyzz/blogshot/dig003/hover-滚动撞车-修复前修复后对比.gif`（还有一张 `hover-真实滚动帧.gif`）。
+
+### 新工具：以后要截图就用 `wdshot.py`
+
+- `python3 wdshot.py <URL> <输出.png> [宽 高]`：geckodriver + **每次全新 profile** + 等 `document.fonts.status=loaded` + 截之前核对 `innerWidth/innerHeight` 和 PNG 头里的宽高，不到位就打「没到位」并返回 2。`sharecard.py` 就是调它。
+- **别再用 `firefox --screenshot`**：它只等 load 事件（字体可能还在路上，量出来的宽度是系统字体顶的假值），而且这台机器上它会**卡死**（上一轮那个 180 秒没返回的就是它）。
+- 实测的怪事（别再查一遍）：这台机器上 headless Firefox **改不动内容尺寸**——`POST /session/…/window` 用真窗口 handle 返回成功，但 innerWidth/innerHeight 一动不动（handle 填 root/parent/window 都是 404 no such window）；窗口高度比内容多 **86px**（开 630 → 内容 544，开 900 → 814）。wdshot 的办法：先按目标开 → 量差值 → 把差值加到 `-width/-height` 上重开一个会话（实测第二次就正）。
+- geckodriver 新版 `POST /window` **必须带 `handle` 字段**（不带就 400 missing field handle）。
+
+### 又踩到的坑（都记下来）
+
+- `pkill -f "http.server -d dist 8093"` **又把自己杀了**（匹配串出现在我自己那条命令里）。规矩：找进程 `pgrep -x`，杀进程用 pid / pid 文件，别用 `-f`。
+- Python 里 **`SystemExit` 不是 `Exception` 的派生类**：`finally` 里 `except Exception` 拦不住它；而收尾再抛一句会**顶掉正文真正的失败原因**（当时屏幕只剩 "DELETE /session/ -> HTTP 405"，白查一轮）。收尾一律 `except BaseException`，并且先判 sid 空不空。
+- 门禁 `check-es.py` 偶尔第一遍报"没过"：npx acorn 要走网络，网络抖一下就被当成语法错。**同一改动重跑一遍再下结论**（这次第二遍就 PASS）。
+- robots.txt 的 Sitemap 行我第一版写成 `…/sitemap.xml/sitemap.xml`（`abs_url()` 已经带文件名了，别再加一层）。
+- **端口 8085 是用户自己的 `mi50-gateway` 服务，别动别杀。**
+
+### 线上待验证（推完之后下一轮先确认这几条）
+
+`/404.html` 和任意不存在的地址是不是出这张自定义页（GitHub Pages 用户站支持，但要实测）、`/favicon.ico`、`/assets/share-card.png`、`/assets/favicon.svg`、`/feed.xml`、`/robots.txt` 是不是 200，文章页 head 里 og 齐不齐，`assets/tokens.json` 是不是真的不再上线。
+
+### 还没定的两件事
+
+1. 卡片深浅：**深色那张已经作为默认提交**，浅色对比图已发用户微信，等他说要不要换。
+2. 两篇说明文换成他自己的真内容（等他给素材）。

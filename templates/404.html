@@ -1,0 +1,35 @@
+    <div class="shell">
+{{RAIL}}
+      <article class="ef-spread">
+        <div class="ef-sheet">
+          <p class="ef-eyebrow slash">SYSTEM / 404</p>
+          <!-- 数字是 CSS 在悬停时填色的（不靠 JS），老内核上就是个空心 404，照样能用 -->
+          <a class="host" href="/index.html" data-fx-host style="display:block;margin-bottom:0.6rem" aria-label="回首页">
+            <span class="ef-hollow-no" data-fx>404</span>
+          </a>
+          <h1 class="title">这个地址下没有东西</h1>
+          <p class="ef-lede">{{LEDE}}</p>
+          <p class="ef-empty">{{WHY}}</p>
+          <p class="ef-actions">
+            <a class="ef-btn go" href="/index.html">回首页</a>
+            <a class="ef-btn" href="/posts.html">全部文章</a>
+            <a class="ef-btn" href="/kb.html">知识库</a>
+            <a class="ef-btn" href="/about.html">关于</a>
+            <button class="ef-btn" type="button" data-theme-toggle>切换深浅</button>
+          </p>
+        </div>
+        <aside class="ef-margin" aria-label="站里的数字和入口">
+          <div class="toc">
+            <h2 class="margin-h ef-field">站里现在有多少</h2>
+            <ul class="ef-ledger">
+{{LEDGER}}
+            </ul>
+            <h2 class="margin-h ef-field">订阅</h2>
+            <ul class="ef-ledger">
+              <li><a href="/feed.xml">RSS · feed.xml</a><span class="ef-field">{{N}} 条</span></li>
+            </ul>
+            <p class="ef-field" style="margin-top:1.5rem">{{BRAND}} · {{CLAIM}}</p>
+          </div>
+        </aside>
+      </article>
+    </div>

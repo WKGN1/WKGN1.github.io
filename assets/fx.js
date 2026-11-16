@@ -101,10 +101,21 @@ function pinRelease(el) {
 export function wireReadouts(root = document) {
   const load = [...root.querySelectorAll('[data-fx-load]')];
   const gap = load.length > 1 ? Math.min(40, 180 / (load.length - 1)) : 0;
-  load.forEach((el, i) => setTimeout(() => scramble(el, 600), 120 + i * gap));
+  // 开场滚动的计时器把 handle 留一份。鼠标一进这一栏就先掐掉它们：不掐就会撞车——
+  // 迟到的 tick 会把已经滚完的数字重新洗成随机字形（看着像"滚完了又回头滚"），
+  // 而且 cancelAnimationFrame 留下的状态是"正在跑、但没有占位宽度"，占位要到下一次
+  // scramble 才挂上，于是这一栏的宽度先跟着随机字形乱缩（实测 -34px），右边的正文
+  // 就被整段拽着走。掐掉之后再滚，宽度全程锁死。
+  const timers = [];
+  load.forEach((el, i) => timers.push(setTimeout(() => scramble(el, 600), 120 + i * gap)));
   root.querySelectorAll('[data-fx-host]').forEach((host) => {
     const key = host.dataset.fxHost;
-    const run = () => (key ? root.querySelectorAll(`[data-fx-of="${key}"]`) : host.querySelectorAll('[data-fx]')).forEach((el) => scramble(el));
+    const run = () => {
+      timers.forEach(clearTimeout);
+      timers.length = 0;              // 掐过就清零：后面的 hover 不该再把开场动画放一遍
+      (key ? root.querySelectorAll(`[data-fx-of="${key}"]`) : host.querySelectorAll('[data-fx]'))
+        .forEach((el) => scramble(el));
+    };
     host.addEventListener('pointerenter', run);
     host.addEventListener('focus', run);
   });

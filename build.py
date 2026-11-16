@@ -6,7 +6,7 @@
   改样式/名字/强调色：改 site.json 和 assets/site.css
   生成：python3 build.py   → dist/
 """
-import json, re, html, pathlib, datetime, collections
+import json, re, html, pathlib, datetime, collections, email.utils, urllib.parse
 
 ROOT = pathlib.Path(__file__).resolve().parent
 TPL = ROOT / "templates"
@@ -25,7 +25,22 @@ def render(name, **kw):
 
 # ---------------------------------------------------------------- markdown
 def esc(s):
-    return html.escape(s, quote=False)
+    # quote=True：这些转义后的值既进正文也进属性（href/content="…"），
+    # 标题或 URL 里出现引号时不会把标签提前闭合。
+    return html.escape(s)
+
+def xesc(s):
+    """XML（RSS）用的转义：& < > 和引号都转，中文保持原样（文件本身是 UTF-8）。"""
+    return html.escape(str(s))
+
+def site_base(conf):
+    """绝对地址的前缀：有自定义域名就用它，否则用 site.json 里的 base。"""
+    dom = (conf.get("domain") or "").strip()
+    if not dom:
+        return (conf.get("base") or "").rstrip("/")
+    if dom.startswith("http://") or dom.startswith("https://"):
+        return dom.rstrip("/")
+    return "https://" + dom.lstrip("/").rstrip("/")
 
 def inline(s):
     s = esc(s)
@@ -193,13 +208,14 @@ def load(conf):
              "updated": max([d["date"] for d in docs if d["date"]] or [""])}
     return docs, posts, notes, stats
 
-def rail(conf, active):
+def rail(conf, active, root_rel=False):
     items = [("index.html", "首页"), ("posts.html", "文章"), ("kb.html", "知识库"), ("about.html", "关于")]
+    pre = "/" if root_rel else ""      # 404 可能在深层路径下被打开，链接要从站点根走
     links = []
     for href, name in items:
         cur = ' aria-current="page"' if href == active else ""
-        links.append('<a href="%s"%s>%s</a>' % (href, cur, esc(name)))
-    return render("rail.html", BRAND=conf["brand"], LINKS="".join(links))
+        links.append('<a href="%s%s"%s>%s</a>' % (pre, href, cur, esc(name)))
+    return render("rail.html", BRAND=conf["brand"], BRAND_LINK=pre + "index.html", LINKS="".join(links))
 
 def records(docs, conf, show_cat=False):
     out = []
@@ -216,8 +232,26 @@ def link(d):
     # 页面全部平铺在 dist/ 里，所以站内链接都是同级，改结构时不用管相对路径
     return ("p-" if d["kind"] == "post" else "n-") + d["slug"] + ".html"
 
-def page(name, body, conf, active, title=None, meta_desc=""):
-    return render("base.html", ASSETS="assets/", VARIANT=conf.get("variant", "site"), BRAND=esc(conf["brand"]),
+def abs_url(conf, fname):
+    """站内某个文件对应的绝对地址。percent-encode 过：文章名可能是中文，
+       直接写进 sitemap / canonical / og:url 里，严格的解析器会翻脸。
+       首页的规范地址就是站点根，别再挂一个 index.html（同一页两个地址会被当成重复内容）。"""
+    if str(fname) == "index.html":
+        return site_base(conf) + "/"
+    return site_base(conf) + "/" + urllib.parse.quote(str(fname), safe="/")
+
+def page(name, body, conf, active, title=None, meta_desc="", fname="index.html",
+         og_type="website", og_article="", root_rel=False):
+    """公共头尾。fname 决定 canonical / og:url 指向哪个地址；
+       root_rel=True 给 404 这种"可能在任意深层路径下被打开"的页面用，
+       那时相对路径会算错，资源和链接一律从站点根走。"""
+    pre = "/assets/" if root_rel else "assets/"          # MODULE 必须是 './assets/' 或 '/assets/'
+    img = abs_url(conf, (conf.get("share_image") or "assets/share-card.png").lstrip("/"))
+    return render("base.html", ASSETS=pre, MODULE=("./" + pre) if not root_rel else pre,
+                  FEED="/feed.xml" if root_rel else "feed.xml",
+                  CANON=esc(abs_url(conf, fname)), OG_TYPE=og_type, OG_IMAGE=esc(img),
+                  OG_ARTICLE=og_article,
+                  VARIANT=conf.get("variant", "site"), BRAND=esc(conf["brand"]),
                   TITLE=esc(title or conf["brand"]), DESC=esc(meta_desc or conf["tagline"]),
                   HEAD_EXTRA=conf.get("head_extra", ""), BODY=body, ACTIVE=active)
 
@@ -248,7 +282,7 @@ def home(conf, docs, posts, notes, stats, built):
                   SOLID=esc(conf["wordmark_solid"]), HOLLOW=esc(conf["wordmark_hollow"]),
                   CLAIM=esc(conf["claim"]), BIO=esc(conf["bio"]), BRAND=esc(conf["brand"]),
                   LATEST_NO=(latest[0]["no"] if latest else "000"),
-                  FRAME_SVG=conf.get("frame_svg", ""), PLATE=esc(conf.get("motto", "")),
+                  FRAME=render("frame.html", PLATE=esc(conf.get("motto", ""))),
                   TICKER=ticker, TICKER2=ticker2,
                   L_NO=(latest[0]["no"] if latest else "000"),
                   L_DATE=fmt_date(latest[0]["date"]) if latest else "",
@@ -267,6 +301,12 @@ def doc_page(conf, d, docs, stats, active=None):
     prevn, nextp = (docs[i + 1] if i + 1 < len(docs) else None), (docs[i - 1] if i else None)
     toc_items = "".join('<li><a href="#%s">%s</a></li>' % (sid, esc(t)) for lv, t, sid in d["heads"] if lv <= 3)
     toc = ('<h2 class="margin-h ef-field">目录</h2><ol>%s</ol>' % toc_items) if toc_items else ""
+    # 分享平台认这几条：发布日期 + 标签（og:type=article 时在 head 里露出来）
+    art = []
+    if d["date"]:
+        art.append('<meta property="article:published_time" content="%s" />' % esc(d["date"]))
+    for t in d["tags"][:6]:
+        art.append('<meta property="article:tag" content="%s" />' % esc(t))
     cats = "".join('<li><a href="kb.html">%s</a><span class="ef-field">%d 篇</span></li>'
                    % (esc(c), len(v)) for c, v in stats["cats_map"].items())
     tags = "".join('<li><span>%s</span><span class="ef-field">%d</span></li>' % (esc(t), n)
@@ -289,7 +329,8 @@ def doc_page(conf, d, docs, stats, active=None):
                   NEXT=('<a class="ef-btn small" href="%s">下一篇 No.%s</a>' % (link(nextp), nextp["no"])) if nextp else "",
                   RAIL=rail(conf, active or ("posts.html" if d["kind"] == "post" else "kb.html")))
     return page(d["slug"], body, conf, active, title=d["title"] + " · " + conf["brand"],
-                meta_desc=d["summary"] or d["title"])
+                meta_desc=d["summary"] or d["title"], fname=link(d), og_type="article",
+                og_article="\n    ".join(art))
 
 def list_page(conf, docs_subset, stats, kind, title, sub):
     groups = collections.OrderedDict()
@@ -311,7 +352,7 @@ def list_page(conf, docs_subset, stats, kind, title, sub):
                                  for c, v in stats["cats_map"].items()),
                   RAIL=rail(conf, "posts.html" if kind == "posts" else "kb.html"))
     return page(kind + "_index", body, conf, "posts.html" if kind == "posts" else "kb.html",
-                title=title + " · " + conf["brand"])
+                title=title + " · " + conf["brand"], fname="posts.html" if kind == "posts" else "kb.html")
 
 def about_page(conf, docs, stats):
     d = read_doc(ROOT / "content" / "about.md", "post") if (ROOT / "content" / "about.md").exists() else None
@@ -333,7 +374,75 @@ def about_page(conf, docs, stats):
                          '<li><span>总字数</span><span class="ef-field">%s 字</span></li>'
                          '<li><span>最近更新</span><span class="ef-field">%s</span></li>'
                          % (stats["posts"], stats["notes"], num(stats["words"]), fmt_date(stats["updated"]))))
-    return page("about", body, conf, "about.html", title="关于 · " + conf["brand"])
+    return page("about", body, conf, "about.html", title="关于 · " + conf["brand"], fname="about.html")
+
+# -------------------------------------------------- 404 页 / 机器人 / RSS 订阅
+CST = datetime.timezone(datetime.timedelta(hours=8))   # 作者在这头，RSS 里的时间按这个算
+
+def not_found(conf, docs, stats):
+    """GitHub Pages 找不到页面时会端出 dist/404.html（用户站生效）。
+       这一页可能在任意深层地址下被打开，所以资源和链接一律从站点根走（root_rel）。
+       右边那几个数字是真数字，别写死。"""
+    live = [d for d in docs if not d["draft"]]
+    ledger = ('<li><span>文章</span><span class="ef-field">%d 篇</span></li>\n'
+              '              <li><span>知识库</span><span class="ef-field">%d 条</span></li>\n'
+              '              <li><span>总字数</span><span class="ef-field">%s 字</span></li>'
+              % (stats["posts"], stats["notes"], num(stats["words"])))
+    body = render("404.html", RAIL=rail(conf, "", root_rel=True), BRAND=conf["brand"],
+                  CLAIM=esc(conf.get("claim", "")), LEDGER=ledger, N=num(len(live)),
+                  LEDE="页面可能改过名，或者链接少抄了一段——已经发布的文章不会换地址，所以这里多半是链接本身写错了。",
+                  WHY="东西都在文章列表和知识库里，找不到就回首页。这一页也是 build.py 生成的：要改文案改 not_found()，要改排布改 templates/404.html。")
+    return page("404", body, conf, "", title="页面没找到 · " + conf["brand"],
+                meta_desc="这个地址下没有东西：去文章列表、知识库或首页看看",
+                fname="404.html", root_rel=True)
+
+def robots_txt(conf):
+    return ("# 这个站由 build.py 生成，这里也是。允许所有爬虫，sitemap 在最后一行。\n"
+            "User-agent: *\nAllow: /\n\nSitemap: %s\n" % abs_url(conf, "sitemap.xml"))
+
+def plain_text(d, limit=140):
+    """RSS 的 description 要纯文本：正文是 HTML，先把标签去掉、再把实体还原回 & 和 <。"""
+    t = html.unescape(re.sub(r"<[^>]+>", " ", d["body"]))
+    t = re.sub(r"\s+", " ", t).strip()
+    if not t:
+        return ""
+    return (t[:limit] + "…") if len(t) > limit else t
+
+def rss_feed(conf, docs, stats):
+    base = site_base(conf)
+    live = [d for d in docs if not d["draft"]]          # 草稿不进订阅
+    items = []
+    for d in live:
+        url = abs_url(conf, link(d))
+        pub = ""
+        try:
+            dt = datetime.datetime.strptime(d["date"], "%Y-%m-%d").replace(tzinfo=CST)
+            pub = "  <pubDate>%s</pubDate>\n" % email.utils.format_datetime(dt)
+        except ValueError:
+            pass                                          # 没写日期就不发 pubDate，别编一个
+        seen, cats = set(), []
+        for c in [d["category"]] + d["tags"]:                # 分类和标签常重名，去过重再发
+            if c and c not in seen:
+                seen.add(c); cats.append(c)
+        cat_xml = "".join("  <category>%s</category>\n" % xesc(c) for c in cats[:6])
+        items.append("<item>\n  <title>%s</title>\n  <link>%s</link>\n"
+                     "  <guid isPermaLink=\"true\">%s</guid>\n%s%s  <description>%s</description>\n</item>\n"
+                     % (xesc(d["title"]), xesc(url), xesc(url), pub, cat_xml,
+                        xesc(d["summary"] or plain_text(d))))
+    card = abs_url(conf, (conf.get("share_image") or "assets/share-card.png").lstrip("/"))
+    now = datetime.datetime.now(CST)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">\n<channel>\n'
+        "  <title>%s</title>\n  <link>%s</link>\n  <description>%s</description>\n"
+        "  <language>zh-CN</language>\n  <lastBuildDate>%s</lastBuildDate>\n"
+        '  <atom:link href="%s" rel="self" type="application/rss+xml" />\n'
+        "  <image>\n    <url>%s</url>\n    <title>%s</title>\n    <link>%s</link>\n"
+        "    <width>1200</width>\n    <height>630</height>\n  </image>\n%s</channel>\n</rss>\n"
+        % (xesc(conf.get("tagline") or conf["brand"]), xesc(abs_url(conf, "index.html")),
+           xesc(conf.get("bio") or conf.get("tagline", "")),
+           email.utils.format_datetime(now), xesc(abs_url(conf, "feed.xml")),
+           xesc(card), xesc(conf["brand"]), xesc(abs_url(conf, "index.html")), "".join(items)))
 
 # ---------------------------------------------------------------- main
 def main():
@@ -345,11 +454,22 @@ def main():
     for sub in ("assets/contours", "posts", "notes"):
         (out / sub).mkdir(parents=True, exist_ok=True)
     import shutil
+    # 运行时用不到的东西别发布：tokens.json 只是给改样式的人看的色值表（12KB），
+    # variant.js 里只在注释里提到它。要留就写进 NO_PUBLISH 之外。
+    NO_PUBLISH = {"tokens.json"}
     for p in (ROOT / "assets").iterdir():
-        if p.is_file():
+        if p.is_file() and p.name not in NO_PUBLISH:
             shutil.copy2(p, out / "assets" / p.name)
     for p in (ROOT / "assets" / "contours").glob("*"):
         shutil.copy2(p, out / "assets" / "contours" / p.name)
+    # static/ 里的东西原样进 dist 根（favicon.ico 这类"客户端直接去根上取"的文件放这里）
+    static = ROOT / "static"
+    if static.is_dir():
+        for p in static.rglob("*"):
+            if p.is_file():
+                dst = out / p.relative_to(static)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(p, dst)
 
     # 图片放 content/img/，会自动拷到 dist/img/，文章里写 ![说明](img/xxx.png) 就能显示
     imgs = ROOT / "content" / "img"
@@ -365,16 +485,20 @@ def main():
     write(out / "about.html", about_page(conf, docs, stats))
     for d in docs:
         write(out / link(d), doc_page(conf, d, docs, stats))
+    write(out / "404.html", not_found(conf, docs, stats))
+    write(out / "robots.txt", robots_txt(conf))
+    write(out / "feed.xml", rss_feed(conf, docs, stats))
     dom = (conf.get("domain") or "").strip()
     if dom:
         (out / "CNAME").write_text(dom + "\n", encoding="utf-8")
+    # 站点地图里别出现草稿；地址一律 percent-encode（文章名可能是中文）
+    urls = ["index.html", "posts.html", "kb.html", "about.html"] + [link(d) for d in docs if not d["draft"]]
     (out / "sitemap.xml").write_text(
         '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
-        + "".join('<url><loc>%s/%s</loc></url>\n' % (conf["base"].rstrip("/"), p)
-                  for p in ["index.html", "posts.html", "kb.html", "about.html"]
-                  + [link(d) for d in docs]) + "</urlset>\n", encoding="utf-8")
+        + "".join('<url><loc>%s</loc></url>\n' % xesc(abs_url(conf, p)) for p in urls) + "</urlset>\n",
+        encoding="utf-8")
 
-    print("生成完成：%d 个页面｜文章 %d｜知识库 %d｜字数 %s｜dist 在 %s"
+    print("生成完成：%d 个页面｜文章 %d｜知识库 %d｜字数 %s｜附 404 页 / feed.xml / robots.txt｜dist 在 %s"
           % (4 + len(docs), len(posts), len(notes), num(stats["words"]), out))
 
 def write(path, text):

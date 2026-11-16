@@ -41,6 +41,10 @@ def bundle(src, dst, note):
     html = re.sub(r'\s*<link rel="stylesheet" href="assets/endfield.css" />', "", html)
     html = re.sub(r'\s*<link rel="stylesheet" href="assets/site.css" />', "", html)
     html = re.sub(r'\s*<link rel="preload" as="font"[^>]*/>', "", html)
+    # 图标和订阅链接同理：离线预览里只有这一个文件，留着就是白抓一次 404
+    html = re.sub(r'\s*<link rel="(?:alternate )?icon"[^>]*/>', "", html)
+    html = re.sub(r'\s*<link rel="apple-touch-icon"[^>]*/>', "", html)
+    html = re.sub(r'\s*<link rel="alternate" type="application/rss\+xml"[^>]*/>', "", html)
     html = html.replace("</head>", "    <style>\n%s\n    </style>\n  </head>" % css, 1)
     html = re.sub(r'\s*<script src="assets/variant.js"></script>', "", html)
     html = html.replace("</head>", "    <script>\n%s\n    </script>\n  </head>" % inline_js((A / "variant.js").read_text(encoding="utf-8")), 1)
