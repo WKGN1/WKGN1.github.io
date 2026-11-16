@@ -1,6 +1,8 @@
 // variant.js: picks a variant before the page paints. Load it in <head> as a
 // plain (not module) script, before the stylesheet:
 //   <script src="../assets/variant.js"></script>
+// Syntax ceiling: ES2015（无参 catch、可选链这些新写法老内核会整份报错），改完跑
+// python3 check-es.py 门禁。
 // It sets data-ef-* on <html> from, in order of strength:
 //   the address: ?variant=coldstore or single axes (?accent=ice&cut=tight …)
 //   attributes already written on <html> (data-ef-variant="site", data-ef-accent=…)
@@ -18,7 +20,7 @@
   let q;
   try {
     q = new URLSearchParams(location.search);
-  } catch {
+  } catch (e) {
     q = new URLSearchParams();
   }
   const name = q.get('variant') || html.dataset.efVariant;
@@ -33,7 +35,7 @@
     let saved = null;
     try {
       saved = localStorage.getItem('theme');
-    } catch {}
+    } catch (e) {}
     if (!saved) html.dataset.theme = preset.theme;
   }
 })();

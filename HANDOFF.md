@@ -64,6 +64,10 @@ git add -A && git commit -m "…" && <上面的 GIT_SSH_COMMAND> git push origin
 6. `.gitignore` 忽略 `dist/`（Pages 由 Actions 现场构建），所以 `dist` 不在仓库里是正常的。
 7. 已发布文章**别改文件名**（文件名就是 URL，改了旧链接失效）；改 `title` 字段无所谓。
 8. 首页"最新"块取的是按日期排序后的第一篇；右栏标签只列出现次数前 8 个。
+9. **模块 import 必须写相对路径**：`import … from 'assets/fx.js'` 是"裸说明符"，浏览器要求以 `./`、`../` 或 `/` 开头，否则整块 `<script type="module">` 直接 TypeError，fx.js 的 wiring（主题按钮、数字滚动）一条都不会跑，页面看着完全正常——**2026-11-16「切换深浅不生效」的真因就是这个**。模板里现在是 `'./{{ASSETS}}fx.js'`，别再改回去。
+10. **JS 语法上限**：`assets/fx.js` ≤ ES2017、`assets/variant.js` ≤ ES2015、页面内联脚本 ≤ ES5。原因：微信安卓端内置浏览器是腾讯 X5 内核，很多机器上还停在 Chromium 77（iOS 微信是系统 Safari，老设备 < 13.1），`?.` / `??` / 无参数 `catch {}` 会让**整份文件在解析阶段报错**，于是 fx.js 全灭。门禁：`python3 check-es.py`（过了打 PASS）。
+11. `templates/base.html` 里有一段**纯 ES5 的主题兜底**（按钮上打 `data-theme-fallback=1`）：fx.js 跑成功会给按钮写 `aria-pressed`，兜底一看就不插手，圆形展开动画仍归 fx.js。改主题相关代码前先想清楚这条链，别把两边都绑上点击（绑两次 = 每点一下就翻回来，看着像坏了）。
+12. 凡是用 `document.startViewTransition` 的地方：在**有** VT 的浏览器里回调是被推迟执行的，同步读 DOM 什么都看不到。`themetest.py` 的做法是要么把 `startViewTransition` 置成不存在（老浏览器的真实路径），要么换一个立刻执行回调的假货。
 
 ## 六、当前内容和线上状态
 
@@ -140,3 +144,17 @@ curl -s -o /dev/null -w "%{http_code}\n" https://wkgn1.github.io/    # 期望 20
 - 备份：`/home/suyzz/blogshot/博客交接-20261116.zip`（含 `.git` 完整历史，不含 `dist/`）。
 - 版本一致性：本机 Python 3.14.4，CI 固定 3.11（本机没有 3.11，改动后按 3.11 兼容写法来过一遍再推）。
 
+
+## 十三、2026-11-16 15:55 修好「切换深浅不生效」
+
+- 现象：用户报线上「切换深浅」按钮点了没反应。
+- 真因（已在本地复现，有报错原文）：`dist/index.html` 里是 `import … from 'assets/fx.js'`，裸说明符 → `TypeError: "assets/fx.js" 是一个裸说明符，但未重新进行任何映射` → 整块模块脚本没执行 → `wireTheme()` 从没绑过点击。CSS、variant.js、`?theme=dark` 都不受影响，所以只有按钮像坏了。
+- 改动（三处，都在源码里）：
+  1. `templates/base.html`：import 改成 `'./{{ASSETS}}fx.js'`。
+  2. `templates/base.html`：加了一段纯 ES5 的主题兜底脚本（见坑 11），fx.js 挂了按钮照样能用。
+  3. `assets/fx.js` 去掉 `?.` / `??` / 无参 `catch`（降到 ES2017），`assets/variant.js` 降到 ES2015 —— 让 X5 那种老内核至少能解析 fx.js。
+- 新增两个仓库内工具（都只用标准库）：
+  - `python3 check-es.py`：JS 语法门禁（调 npx 里的 acorn，第一次要联网）。
+  - `python3 themetest.py dist`：往 `dist/` 塞 `t-nofx.html`（只剩兜底）、`t-novt.html`（fx.js，无 VT）、`t-vt.html`（fx.js，圆形展开分支），用 `firefox --no-remote --profile ~/snap/firefox/common/ffprof --screenshot=… --window-size=1280,760 "http://127.0.0.1:8088/t-novt.html?noanim"` 截图看绿/红横幅；单文件预览版也照这个办法验（把 `TEST`+`BREADCRUMB` 贴到 `预览-首页.html` 的 `</body>` 前）。
+- 本轮自检结果：4 种组合全绿 —— ① 抽掉 fx.js 只剩兜底 ✅ ② fx.js 且无 VT ✅ ③ fx.js 走 VT 分支 ✅ ④ 单文件离线预览 ✅（都是点一下变深色、再点回浅色、token `--ef-paper` 跟着翻、`aria-pressed` 同步、`localStorage.theme` 有存）。
+- 结论图：`/home/suyzz/blogshot/主题切换自检-20261116.png`（已发用户微信）。`t-*.html` 只在 `dist/` 里，不进仓库（`dist/` 被 gitignore）。

@@ -15,8 +15,56 @@
   <body class="ef ef-contours">
     <div class="ef-tri ef-in-sweep" aria-hidden="true"><i></i><i></i><i></i></div>
 {{BODY}}
+    <!-- 主题按钮的兜底，纯 ES5：老内核（微信安卓端 X5 常见是 Chromium 77）解析不了
+         fx.js 时，按钮照样能切换深浅。fx.js 跑成功会给按钮写上 aria-pressed，
+         这段一看就不插手，圆形展开的切换动画仍然归 fx.js 管。 -->
+    <script>
+      (function () {
+        var html = document.documentElement;
+        var STORE = 'theme';
+        function saved() {
+          try { var v = localStorage.getItem(STORE); return (v === 'light' || v === 'dark') ? v : ''; } catch (e) { return ''; }
+        }
+        function sysDark() {
+          try { return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches); } catch (e) { return false; }
+        }
+        function dark() { var s = saved(); return s ? s === 'dark' : sysDark(); }
+        function buttons() { return document.querySelectorAll('[data-theme-toggle]'); }
+        function mark() {
+          var b = buttons(), i;
+          for (i = 0; i < b.length; i++) b[i].setAttribute('aria-pressed', dark() ? 'true' : 'false');
+        }
+        function flip() {
+          var next = dark() ? 'light' : 'dark';
+          html.setAttribute('data-theme', next);
+          try { localStorage.setItem(STORE, next); } catch (e) {}
+          mark();
+        }
+        function wire() {
+          var b = buttons(), i;
+          for (i = 0; i < b.length; i++) {
+            if (b[i].getAttribute('data-theme-fallback') === '1') continue;
+            b[i].setAttribute('data-theme-fallback', '1');
+            b[i].addEventListener('click', flip);
+          }
+          mark();
+        }
+        function check() {
+          var b = document.querySelector('[data-theme-toggle]');
+          if (!b) return;                                       // 这一页没有这个按钮
+          if (b.getAttribute('aria-pressed') !== null) return;  // fx.js 已经接手
+          wire();
+        }
+        function later() {
+          check();                 // 模块脚本按规矩在 DOMContentLoaded 之前就该执行完
+          setTimeout(check, 1200); // 再兜一次，万一这台机器上顺序不对
+        }
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', later);
+        else later();
+      })();
+    </script>
     <script type="module">
-      import { wireReadouts, wireTheme, wireParallax } from '{{ASSETS}}fx.js';
+      import { wireReadouts, wireTheme, wireParallax } from './{{ASSETS}}fx.js';
       wireReadouts();
       wireTheme();
       wireParallax(document.querySelector('[data-hero]'));

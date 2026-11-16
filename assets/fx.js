@@ -11,6 +11,11 @@
 //   and "done" on a button: see each function below.
 //
 //   import { wireReadouts, wireTheme } from './fx.js'; wireReadouts(); wireTheme();
+//
+// Syntax ceiling: ES2017. The build is a plain ES module, but no newer-than-2017
+// syntax: 可选链 ?. / 空值合并 ?? / 无参 catch 都会让老内核（微信安卓端的 X5 常见是
+// Chromium 77，Safari < 13.1）在解析阶段就整份报错，连带把主题按钮一起带走。
+// 改完请跑门禁：python3 check-es.py（见 HANDOFF.md）。
 
 const still = matchMedia('(prefers-reduced-motion: reduce)');
 const running = new WeakMap();
@@ -36,7 +41,7 @@ export function scramble(el, ms = 360) {
   if (still.matches) return;
   const before = running.get(el);
   if (before) cancelAnimationFrame(before.frame);
-  const nodes = before?.nodes ?? textNodes(el).map((n) => ({ n, final: n.data }));
+  const nodes = before ? before.nodes : textNodes(el).map((n) => ({ n, final: n.data }));
   const final = nodes.map((x) => x.final).join('');
   if (!/[0-9A-Za-z]/.test(final)) return;
   const labelled = before ? before.labelled : el.hasAttribute('aria-label');
@@ -91,7 +96,7 @@ export function wireTheme(root = document, { reveal = true } = {}) {
   try {
     const saved = localStorage.getItem('theme');
     if (saved === 'light' || saved === 'dark') html.dataset.theme = saved;
-  } catch {}
+  } catch (e) {}
   const isDark = () => (html.dataset.theme ? html.dataset.theme === 'dark' : system.matches);
   const buttons = [...root.querySelectorAll('[data-theme-toggle]')];
   const sync = () => buttons.forEach((b) => b.setAttribute('aria-pressed', String(isDark())));
@@ -99,7 +104,7 @@ export function wireTheme(root = document, { reveal = true } = {}) {
     html.dataset.theme = isDark() ? 'light' : 'dark';
     try {
       localStorage.setItem('theme', html.dataset.theme);
-    } catch {}
+    } catch (e) {}
     sync();
   };
   buttons.forEach((b) =>
@@ -158,7 +163,10 @@ export async function closeDialog(dialog, value) {
 
 export function wireDialogs(root = document) {
   root.querySelectorAll('[data-open]').forEach((b) =>
-    b.addEventListener('click', () => document.getElementById(b.dataset.open)?.showModal()),
+    b.addEventListener('click', () => {
+      const d = document.getElementById(b.dataset.open);
+      if (d) d.showModal();
+    }),
   );
   root.querySelectorAll('dialog:is(.ef-drawer, .ef-dialog)').forEach((d) => {
     d.addEventListener('cancel', (e) => {
@@ -179,7 +187,8 @@ export function toast(text, ms = 2000) {
   el.className = 'ef-toast';
   el.setAttribute('role', 'status');
   el.textContent = text;
-  (document.querySelector('.ef') ?? document.body).append(el);
+  const host = document.querySelector('.ef') || document.body;
+  host.append(el);
   setTimeout(async () => {
     el.classList.add('is-closing');
     await settled(el);
