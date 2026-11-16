@@ -15,9 +15,11 @@
 - 项目目录：`/run/media/suyzz/e2270998-5ad9-4aef-860c-ba06f27ea0a9/strata/dsh/dsh_wechat/blog`
 - 已有 git 仓库与历史（多次提交），`origin` = `git@github.com:WKGN1/WKGN1.github.io.git`
 - 推送用 SSH 部署密钥：`~/.ssh/id_ed25519`（公钥已加进仓库 Deploy Keys，id 170013868，**有写权限**，实测能推）；`~/.ssh/config` 已配 `IdentityFile` + `IdentitiesOnly`，github.com 实际走 `ssh.github.com:443`（22 口不稳）
+  **但 2026-11-16 收尾时这把密钥已失效**：用户按建议撤销了 PAT，而 GitHub 会连带删除「用该 token 添加的 SSH 密钥 / 部署密钥」，所以现在 `git@github.com` 报 `Permission denied (publickey)`。本机私钥还在（指纹 `SHA256:2sfcFuo8tBxIUqv8ea/NKMgOrHK7Ua34jUtrvICc4Co`），只差把它重新加进仓库。
 - 推送命令示例：
   `GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519" git push origin main`
 - token：那串 `ghp_...`（scope 只有 repo + workflow）**已让用户撤销**。要用 API（查构建日志、改 Pages 设置、加自定义域名）得再向用户要新 token。token 若拿到，存 `~/.config/blog/token`（chmod 600），别写进仓库。
+  **规矩**：撤销 token 会连带删掉**用这个 token 添加的** SSH key / 部署密钥；在仓库界面里**手动**添加的部署密钥不受 token 撤销影响。所以若想要"以后可以随便撤 token"，先在仓库 UI 里手动加好部署密钥。
 
 ### 网络注意（重要，别踩）
 这台机器到 `github.com` 的 **HTTPS 很不稳**（时好时坏，经常超时），但：
@@ -108,3 +110,19 @@ python3 -m http.server -d dist 8080 &  # 或直接用线上地址
 curl -s -o /dev/null -w "%{http_code}\n" https://wkgn1.github.io/    # 期望 200
 ```
 改完之后：提交 → SSH 推送 → 等 Actions（`GET api.github.com/repos/WKGN1/WKGN1.github.io/actions/runs?per_page=1`，没 token 就只能靠用户或让用户再给一个）→ curl 线上确认 200 → 给用户发一张截图照片。
+
+## 十一、本轮收尾时留下的事（下一个会话请先处理）
+
+1. **推送权限需要恢复**（两选一，都让用户在手机上点几下）：
+   - 办法 1（推荐，之后不依赖 token）：用户打开 `https://github.com/WKGN1/WKGN1.github.io/settings/keys` → **Add deploy key** → Title 填 `blog`，Key 粘贴这串公钥 → **务必勾上 Allow write access** → Add key：
+
+     `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMqAlC683hEwNXNDkBT+k/c0pTM0/jrwL/xLJ9QvwdBd blog-deploy`
+
+     加完即可推送：
+
+     `GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519" git push origin main`
+
+   - 办法 2（最省事）：让用户再发一串 token（classic，勾 repo + workflow），用它 POST `/repos/WKGN1/WKGN1.github.io/keys`（body 里带 `"admin": true`）把上面这串公钥加回去；**提醒他这串 token 先别撤销**，否则又会把密钥一起删掉。
+2. **有一个提交没推上去**：`444439a 加交接说明 HANDOFF.md`（线上站点对应 `d3be956`，两者页面内容相同，只是仓库里缺这份交接说明）。恢复推送权限后先 `git push`，并确认 Actions 构建 success。
+3. **交接包**：`博客交接-20261116.zip` —— 含全部源码 + `.git`（完整历史与 remote 配置），不含 `dist/`（用 `python3 build.py` 现场生成）。解压到任意目录，`cd` 进去干活。
+4. 用户只想看效果时直接给线上地址：`https://wkgn1.github.io`（深色 `?theme=dark`，换配色 `?variant=coldstore`）。要发照片就用本机 Firefox 无头截图（snap 版 Firefox 只能往 `~/snap/firefox/common/` 里写文件，且要带 `--no-remote --profile /home/suyzz/snap/firefox/common/ffprof`）。
