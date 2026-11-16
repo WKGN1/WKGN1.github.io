@@ -1,0 +1,110 @@
+# 交接说明（给下一个会话看的）
+
+最后更新：2026-11-16 13:53（Asia/Shanghai）。上一轮会话把博客从设计、搭建到部署全部做完了，这一轮的任务是**测试、维护、调整**。
+
+## 一、结论先记住
+
+- 线上地址：**https://wkgn1.github.io**（已验证 200，子页面和资源都通）
+- GitHub：账号 **WKGN1**，仓库 **WKGN1/WKGN1.github.io**（Public，分支 `main`）
+- 发布方式：`git push` 到 `main` → GitHub Actions（`.github/workflows/deploy.yml`）自动 `python3 build.py` → 上传 `dist` → 发布 Pages。**1-2 分钟生效**，已验证两次成功。
+- 站点风格：终末地风味，来自开源 skill `hhikr/endfield-ui-skill`（MIT 无授权限制的 CSS/token 体系，**不含游戏素材**）。强调色默认 `site` 预设（琥珀黄 + 暖纸 + 大切角）。
+- 署名 **SuYzz**；一切与银行/柜面相关的内容都已删除。简介用的是「自己的机器，自己的模型，自己的记录」。
+
+## 二、这台机器上的位置和凭据
+
+- 项目目录：`/run/media/suyzz/e2270998-5ad9-4aef-860c-ba06f27ea0a9/strata/dsh/dsh_wechat/blog`
+- 已有 git 仓库与历史（多次提交），`origin` = `git@github.com:WKGN1/WKGN1.github.io.git`
+- 推送用 SSH 部署密钥：`~/.ssh/id_ed25519`（公钥已加进仓库 Deploy Keys，id 170013868，**有写权限**，实测能推）；`~/.ssh/config` 已配 `IdentityFile` + `IdentitiesOnly`，github.com 实际走 `ssh.github.com:443`（22 口不稳）
+- 推送命令示例：
+  `GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519" git push origin main`
+- token：那串 `ghp_...`（scope 只有 repo + workflow）**已让用户撤销**。要用 API（查构建日志、改 Pages 设置、加自定义域名）得再向用户要新 token。token 若拿到，存 `~/.config/blog/token`（chmod 600），别写进仓库。
+
+### 网络注意（重要，别踩）
+这台机器到 `github.com` 的 **HTTPS 很不稳**（时好时坏，经常超时），但：
+- `api.github.com` 稳定（0.3 秒级）→ 所有 REST 操作走它
+- `github.com:22` / `ssh.github.com:443` SSH 可用 → **推代码只走 SSH，别用 https+token**
+- 需要 curl 碰 `github.com` 时，用 `--resolve github.com:443:140.82.121.4` 之类钉 IP，并多重试
+
+## 三、日常操作三条命令
+
+```bash
+cd <项目目录>
+python3 build.py                              # 生成 dist/（零依赖，只用 Python 标准库）
+python3 -m http.server -d dist 8080           # 本地预览 http://127.0.0.1:8080
+git add -A && git commit -m "…" && <上面的 GIT_SSH_COMMAND> git push origin main   # 发布
+```
+
+另外 `python3 bundle.py` 会把已生成的页面打成**单文件离线预览**（`dist/预览-*.html`，字体/样式/脚本全内联），方便发给只能用手机的用户看效果。
+
+## 四、改哪儿改什么
+
+| 想改 | 改哪 |
+| --- | --- |
+| 站名、简介、座右铭、导航、联系方式、技能清单、强调风格、建站日期、域名、统计代码 | **只有一个文件：`site.json`** |
+| 页面排布、字号、间距、响应式 | `assets/site.css` |
+| 整套外观规则（颜色、切角、动效曲线、深浅色变量） | `assets/endfield.css` + `assets/tokens.json` |
+| 某种页面的骨架 | `templates/home.html`（首页）、`templates/doc.html`（文章）、`templates/list.html`（列表）、`templates/about.html`（关于）、`templates/rail.html`（侧栏）、`templates/base.html`（公共头尾） |
+| 文章内容 | `content/posts/*.md`；知识库条目 `content/notes/*.md`；关于页 `content/about.md` |
+| 插图 | 放 `content/img/`，正文写 `![说明](img/文件名.png)`，构建自动拷贝 |
+
+- Markdown 支持：`#`~`####` 标题、段落、`-`/`1.` 列表、`>` 引用、` ``` ` 代码块、`\|` 表格、`---`、行内 `` ` ``、`**粗体**`、`[链接](url)`、`![图](img/x.png)`。
+- front matter 字段：`title` `date` `tags`（逗号分隔）`summary` `category` `draft`（`true` 则不出现在列表，但字数照算）。文件名以下划线开头（如 `_模板.md`）会被跳过。
+- 页面上的数字（篇数、字数、阅读分钟、分类计数、"第 N 天"）都是 `build.py` 现算的真数字——**这套风格要求数字必须是真的**，别在页面里手写统计。
+- 临时试效果：地址后加 `?theme=dark`、`?variant=coldstore`、`?noanim`（关动效，截图用）。深浅默认跟随系统，用户点"切换深浅"后记在 localStorage 的 `theme`。
+
+## 五、已经踩过的坑（别再踩）
+
+1. `bundle.py` 内联 JS 必须把 `</` 转义成 `<\/`——`variant.js` 注释里写着 `</script>`，否则 HTML 会提前闭合，整段 JS 变成页面上的文字。
+2. `site.json` 里 `links` 是对象数组（`key`/`name`/`url`），别用解包迭代（曾把字典的键当值，页面上渲染出 `k=ng`）。
+3. `build.py` 里所有页面都平铺在 `dist/` 根（文件名 `p-` 前缀=文章，`n-`=笔记），站内链接都是同级，因此 CSS/JS 路径永远是 `assets/…`；改成子目录要同步改 `{{ASSETS}}`。
+4. 段落边界那个正则里不能同时出现两个捕获组 + 反向引用（Python 会报 "cannot refer to an open group"），已改成 `BLOCK_START` / `HR` 两个预编译表达式。
+5. 没有自定义域名时**不要**生成空 `CNAME` 文件（已修）。要上自定义域名：`site.json` 的 `domain` 填上，构建会自动生成 `dist/CNAME`，再去 DNS 加 CNAME 记录。
+6. `.gitignore` 忽略 `dist/`（Pages 由 Actions 现场构建），所以 `dist` 不在仓库里是正常的。
+7. 已发布文章**别改文件名**（文件名就是 URL，改了旧链接失效）；改 `title` 字段无所谓。
+8. 首页"最新"块取的是按日期排序后的第一篇；右栏标签只列出现次数前 8 个。
+
+## 六、当前内容和线上状态
+
+- 文章 2 篇：`这台博客是怎么搭起来的`（也当写法模板）、`为什么在自己的机器上跑模型`
+- 知识库 2 条：`机器跑不动时的排查顺序`（分类 运维）、`模型量化怎么选`（分类 本地模型）
+- 关于页：我是谁 / 我在做什么 / 这个站怎么用 / 联系我
+- 合计约 700 字，`since` 设的 2026-11-01，所以首页显示"第 15 天"这类真数字
+- 联系方式：GitHub 已指向真实账号 `github.com/WKGN1`；**邮箱还是占位 `示例@example.com`**（公开可见，要么换成真邮箱要么删掉这一行）；微信那行写的是"可私信"
+- 仓库是 Public：源码和用户写的文章全球可见（免费 Pages 的限制，用户已接受）
+
+## 七、待办 / 用户可能让你做的事
+
+1. 换真实邮箱，或删掉邮箱那行
+2. 那两篇目前偏"说明文"，用户可能想换成自己的真内容；想删就删（记得同时看要不要留 `_模板.md`）
+3. favicon + 社交分享卡片图（写进 `site.json` 的 `head_extra`，图片放 `assets/` 或 `content/img/`）
+4. 访问统计（国内能用的小统计，一段代码进 `head_extra`）
+5. 自己的域名（买域名 → `site.json` 的 `domain` → DNS CNAME）
+6. 站内搜索（知识库变大后再加；纯静态可用一个生成 JSON 索引 + 前端过滤的小方案）
+7. 配色/深浅的最终确认：当前默认 `variant=site`（琥珀），备选 `standard` / `coldstore` / `nightshift`
+8. 想加"能力优势/作品集"更重的板块（比如项目卡片、履历时间线）——注意这套风格的规矩：唯一强调色、切角只在可点击元素上、1px 细线分区、不许发光渐变卡片、数字必须真实
+
+## 八、和这位用户打交道的规矩
+
+- 他只在**微信**上、用手机，看不到也打不开这台电脑的目录：**不要让他"去打开某个路径"**。要给他看东西就直接发——图片当照片发，其它文件当附件发（用 `send_to_wechat`，绝对路径）。
+- 回复要**短**，适合手机读；能用三行说完就别写十行。
+- 他打不开 `*.lhr.life` 这类境外临时域名（微信内置浏览器/网络都会挡），要预览就发**截图照片**或**单文件 HTML 附件**（附件要告诉他"右上角用浏览器打开"）。
+- 涉及公开内容的隐私提醒：站点和仓库都是公开的，单位名、真名、工号、客户数据这类东西写之前要提醒他。
+- 需要他做 GitHub 上的操作时，给精确到"打开哪个网址、点哪个按钮"的步骤（他愿意照做，但讨厌自己找）。
+
+## 九、上次会话留下的进程
+
+- 本机预览服务：`python3 -m http.server 8088`（静态服务 `dist/`）可能还在跑，端口 8088
+- 临时外网通道：`ssh -R 80:127.0.0.1:8088 nokey@localhost.run` 的自动重连循环，日志 `/tmp/tunnel.log`、当前域名记录在 `/tmp/tunnel_url.txt`（上次的域名 `88dbd21479f949.app.lhr.life`，现已不需要，线上走 github.io）。要重开：
+  `setsid bash -c 'while :; do ssh -n -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=25 -o ExitOnForwardFailure=yes -R 80:127.0.0.1:8088 nokey@localhost.run >>/tmp/tunnel.log 2>&1; sleep 8; done' &`
+  注意：`pkill -f` 的匹配串如果出现在你自己的命令里会把自己杀掉（上一轮自杀过两次）——找进程用 `pgrep -x ssh`，杀进程用 pid 文件或 `pgrep -x`。
+- 截图/预览产物放在 `/home/suyzz/blogshot/`（线上截图 `live-grid.png`、单文件预览 `预览-*.html` 等）。Firefox 无头截图要点：snap 版 Firefox 只能往 `~/snap/firefox/common/` 里写文件，命令要带 `--no-remote --profile /home/suyzz/snap/firefox/common/ffprof`。
+
+## 十、下次开工先跑这几步（自检）
+
+```bash
+cd <项目目录> && git status && git log --oneline -3
+python3 build.py                       # 应该报「生成完成：N 个页面…」
+python3 -m http.server -d dist 8080 &  # 或直接用线上地址
+curl -s -o /dev/null -w "%{http_code}\n" https://wkgn1.github.io/    # 期望 200
+```
+改完之后：提交 → SSH 推送 → 等 Actions（`GET api.github.com/repos/WKGN1/WKGN1.github.io/actions/runs?per_page=1`，没 token 就只能靠用户或让用户再给一个）→ curl 线上确认 200 → 给用户发一张截图照片。
