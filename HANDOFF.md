@@ -227,3 +227,41 @@ curl -s -o /dev/null -w "%{http_code}\n" https://wkgn1.github.io/    # 期望 20
 
 1. 卡片深浅：**深色那张已经作为默认提交**，浅色对比图已发用户微信，等他说要不要换。
 2. 两篇说明文换成他自己的真内容（等他给素材）。
+
+## 十七、2026-11-17 07:30 内容换成他自己的真东西（第一篇真数字的文章上线）
+
+用户选的方向：**"我根据你真在跑的东西先起草，你再改"**。卡片配色他选了**深色**（就是已上线那张，不用动）；统计/域名/字体瘦身这轮**都不加**。
+
+### 这轮写的两篇
+
+1. **新文章 No.005** `content/posts/2026-11-17-32G显存怎么跑71G的模型.md`：MI50 上跑 MoE 的三层账 + 一次请求的实测 + "一卡两门"的搭法。
+2. **重写 No.002**（文件名/地址没动，只换正文，里面写了一句"11-17 重写"）：三条理由三条代价全部换成这台机器上真发生过的。
+
+### 文章里每个数的出处（用户要核的时候按这个查）
+
+| 文里的说法 | 从哪量的 |
+| --- | --- |
+| Xeon E5-2698 v3 / 32 线程 / 内存 61 GiB / Ubuntu 26.04 | `lscpu`、`free -g`、`/etc/os-release` |
+| MI50 = Vega 20、显存 32 GiB | `lspci`、`/sys/class/drm/card1/device/mem_info_vram_total` = 34342961152 |
+| 模型 76,142,283,328 字节（≈71 GiB） | `work/models/…` 两个 GGUF 分片相加（44.09 + 26.82 GiB） |
+| 就绪 975 秒 | 实例 JSON 里的 `engine_ready_s` |
+| 43.1 tok/s、prompt 192115=189385复用+2730现读、草稿 599/679 | 引擎日志 `.local/share/strata/install/strata-swift-iq3_xxs.log` |
+| 一次请求专家读 46427.1 MB、其中 46421.3 MB 在页缓存、真读盘 91.5 MB | 同一行日志的 "file tier I/O" |
+| 会话缓存 6 GiB、显存预留 1280 MiB | systemd unit 的 `STRATA_OVERRIDE=--conversation-cache-mib 6144` 与实例 JSON 的 `--vram-reserve-mib 1280` |
+| 40.2 / 49.2 tok/s、冷启动 1.9 tok/s | 同日日志里另外几行 |
+| TDP 300 W / 145 W、整机四百瓦上下 | 公开规格 + 明确写了"没上功率计" |
+
+**替他留着没写的（他觉得可以实名再加回去）**：模型名和别名（`swift-1.5-iq3_xxs`、目录名 `sc117`、那串 `Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS` 文件名）、引擎和桌面端的名字（Strata / dsh）、端口以外的地址、API key 和 `~/.config/mi50-gateway/lan-key`（**key 一律不上站**）。文里统一写成"我自己的引擎 / 桌面端 / 命令行端"。
+
+### 这台机器上相关的一堆事实（下一轮要用就别再量一遍）
+
+- 脚本都在 `~/.local/bin/`：`mi50-gateway`（8085→18500，把每次加载换的 key 补上；`0.0.0.0` 监听，外面来的一律要 lan-key）、`strata-mi50-supervisor`（桌面端开着就停独立引擎、起网关；关了反过来；5 秒一轮）、`strata-mi50-autoload`（每 10 秒看桌面端 API，没实例没任务才发 load）、`wait-for-mi50`（在 KFD 拓扑里等 `gfx_target_version 90006`，2 秒×90 次，等不到也放行）、`strata-up`。
+- systemd **用户**服务：`strata-mi50-gateway.service`、`strata-mi50-supervisor.service`（都 `Restart=always`）、`strata-iq2xs.service`（oneshot + `TimeoutStartSec=420`，**现在状态是 failed**，那是另一套 IQ2_XS 的配置，不是当前在跑的那条路）。
+- 桌面端的宿主 API 在 `127.0.0.1:47831`（`/api/native`、`/api/native/operations`），引擎在 `127.0.0.1:18500`，网关在 `0.0.0.0:8085`。**8085 是用户自己的服务，别杀别动。**
+- 磁盘：NVMe 825G 用了 114G，模型和 pack 在 `work/` 下（模型 72G、pack 1.5G、MTP 草稿 787M）。
+
+### 还没定的
+
+1. 名字要不要实名（上面那张"替他留着没写"的清单）——已问用户。
+2. **No.003《这台博客是怎么搭起来的》要不要留**：它现在兼作写法模板的示范；要退掉的话记得 `content/posts/_模板.md` 还没有，需要就先建一个。
+3. 两条知识库条目（量化怎么选 / 排查顺序）也是说明文口吻，可以按 No.005 的路子换成真数字版——**这轮没动**，等用户发话。
