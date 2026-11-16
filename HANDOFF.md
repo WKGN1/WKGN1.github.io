@@ -75,12 +75,12 @@ git add -A && git commit -m "…" && <上面的 GIT_SSH_COMMAND> git push origin
 - 知识库 2 条：`机器跑不动时的排查顺序`（分类 运维）、`模型量化怎么选`（分类 本地模型）
 - 关于页：我是谁 / 我在做什么 / 这个站怎么用 / 联系我
 - 合计约 700 字，`since` 设的 2026-11-01，所以首页显示"第 15 天"这类真数字
-- 联系方式：GitHub 已指向真实账号 `github.com/WKGN1`；**邮箱还是占位 `示例@example.com`**（公开可见，要么换成真邮箱要么删掉这一行）；微信那行写的是"可私信"
+- 联系方式：GitHub 已指向真实账号 `github.com/WKGN1`；邮箱是真的 **`suyyz@foxmail.com`**（2026-11-16 用户给的，只出现在关于页的「联系我」）；微信那行写的是"可私信"
 - 仓库是 Public：源码和用户写的文章全球可见（免费 Pages 的限制，用户已接受）
 
 ## 七、待办 / 用户可能让你做的事
 
-1. 换真实邮箱，或删掉邮箱那行
+1. 换真实邮箱 —— **已做完**（`suyyz@foxmail.com`，写在 `site.json` 的 links 里）
 2. 那两篇目前偏"说明文"，用户可能想换成自己的真内容；想删就删（记得同时看要不要留 `_模板.md`）
 3. favicon + 社交分享卡片图（写进 `site.json` 的 `head_extra`，图片放 `assets/` 或 `content/img/`）
 4. 访问统计（国内能用的小统计，一段代码进 `head_extra`）
@@ -158,3 +158,10 @@ curl -s -o /dev/null -w "%{http_code}\n" https://wkgn1.github.io/    # 期望 20
   - `python3 themetest.py dist`：往 `dist/` 塞 `t-nofx.html`（只剩兜底）、`t-novt.html`（fx.js，无 VT）、`t-vt.html`（fx.js，圆形展开分支），用 `firefox --no-remote --profile ~/snap/firefox/common/ffprof --screenshot=… --window-size=1280,760 "http://127.0.0.1:8088/t-novt.html?noanim"` 截图看绿/红横幅；单文件预览版也照这个办法验（把 `TEST`+`BREADCRUMB` 贴到 `预览-首页.html` 的 `</body>` 前）。
 - 本轮自检结果：4 种组合全绿 —— ① 抽掉 fx.js 只剩兜底 ✅ ② fx.js 且无 VT ✅ ③ fx.js 走 VT 分支 ✅ ④ 单文件离线预览 ✅（都是点一下变深色、再点回浅色、token `--ef-paper` 跟着翻、`aria-pressed` 同步、`localStorage.theme` 有存）。
 - 结论图：`/home/suyzz/blogshot/主题切换自检-20261116.png`（已发用户微信）。`t-*.html` 只在 `dist/` 里，不进仓库（`dist/` 被 gitignore）。
+
+## 十四、2026-11-16 16:20 用户新报：大数字那一行的动效
+
+- 用户原话：**「显示 003 大数字那一条的动效不对，文字不能一起震动」**。这条投诉很可能是 fx.js 修好之后才第一次露出来的（之前整块 fx.js 没执行，滚动效果根本没跑过）。
+- 已实测排除"宽度把正文挤来挤去"这个猜测：`themetest.py` 生成的 `t-nojit.html` 里把大数字逐个换成 000…999 并量宽度和正文左边界 —— **数字宽 282.2→282.2（差 0px）、正文左边抖 0px**，Saira 的数字本来就是等宽的；顶部那几个计数（15 / 4 / 2 / 717）自身宽差也是 0px。所以正文没有被挤动，问题在数字自己滚动的观感上。
+- 涉及代码：`templates/home.html` 的 `.latest` 块（`data-fx-host` + 大数字上的 `data-fx`，鼠标进入/获得焦点时 `fx.js` 的 `wireReadouts` 会让 `data-fx` 的数字滚一遍，逐位从左到右锁死，600ms）；观感细节在 `assets/fx.js` 的 `scramble()`。
+- 2026-11-16 16:22 状态：已把三种改法发给用户选，等他回哪个（不滚 / 只滚末位快一点、前面的立刻锁住 / 整块文字也别带滚动）。**改之前别自己猜着动 fx.js**。
