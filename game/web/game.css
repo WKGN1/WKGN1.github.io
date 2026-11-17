@@ -1,0 +1,368 @@
+/* 方块彩蛋的页面样式。颜色、字体、切角全部走站点 token（endfield.css 定义的 --ef-*），
+   所以站点换主题/换强调色时这一页跟着变。var() 的第二个参数是兜底值，
+   万一 CSS 没加载上（比如从别的目录打开），页面也不至于白底黑字。 */
+
+html,
+body {
+  height: 100%;
+}
+
+.game-body {
+  display: flex;
+  flex-direction: column;
+  background: var(--ef-paper, #f4f4f2);
+  color: var(--ef-ink, #161616);
+  margin: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: none;
+}
+
+/* hidden 属性必须赢过下面的 display 规则：HTML 的 hidden 只是 UA 样式里的
+   display:none，任何作者写的 display:flex 都会把它顶掉。这个页面的门面板、
+   HUD、提示行都是靠 JS 切 hidden 的，所以统一在这里兜住。 */
+[hidden] {
+  display: none !important;
+}
+
+/* 顶栏 */
+.g-top {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.5rem var(--ef-pad, 1rem);
+  border-bottom: 1px solid var(--ef-rule, #d9d9d6);
+  background: var(--ef-panel, #fff);
+  font-family: var(--ef-font-ui, sans-serif);
+  flex: 0 0 auto;
+}
+
+.g-back {
+  color: var(--ef-ink, #161616);
+  text-decoration: none;
+  font-size: var(--ef-t-ui, 0.9375rem);
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--ef-rule, #d9d9d6);
+}
+
+.g-back:hover {
+  background: var(--ef-chip, #e4e4e0);
+}
+
+.g-title {
+  font-family: var(--ef-font-ui, sans-serif);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-size: var(--ef-t-ui, 0.9375rem);
+}
+
+.g-title b {
+  color: var(--ef-ink-2, #5c5c5c);
+  font-weight: 500;
+  font-family: var(--ef-font-mono, monospace);
+  margin-left: 0.4rem;
+}
+
+.g-tools {
+  margin-left: auto;
+  display: flex;
+  gap: 0.4rem;
+}
+
+.g-btn {
+  font: inherit;
+  font-family: var(--ef-font-ui, sans-serif);
+  font-size: var(--ef-t-field, 0.8125rem);
+  letter-spacing: 0.04em;
+  padding: 0.35rem 0.7rem;
+  background: var(--ef-chip, #e4e4e0);
+  color: var(--ef-ink, #161616);
+  border: 1px solid var(--ef-rule, #d9d9d6);
+  cursor: pointer;
+  clip-path: polygon(0 0, calc(100% - 7px) 0, 100% 7px, 100% 100%, 7px 100%, 0 calc(100% - 7px));
+}
+
+.g-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.g-btn:not(:disabled):hover {
+  background: var(--ef-signal, #fffa00);
+  color: var(--ef-on-signal, #161616);
+}
+
+/* 舞台：canvas 的外框用站点的切角手法 */
+.g-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: var(--ef-pad, 1rem);
+  display: flex;
+}
+
+.g-frame {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  border: 1px solid var(--ef-ink, #161616);
+  background: #9fc6e8;
+  overflow: hidden;
+  clip-path: polygon(0 0, calc(100% - var(--ef-cut, 7px)) 0, 100% var(--ef-cut, 7px), 100% 100%, var(--ef-cut, 7px) 100%, 0 calc(100% - var(--ef-cut, 7px)));
+}
+
+.g-frame canvas {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+  touch-action: none;
+}
+
+/* HUD */
+.g-hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-family: var(--ef-font-ui, sans-serif);
+  padding: 0.6rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.g-hud-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.9rem;
+  align-items: baseline;
+  font-size: var(--ef-t-field, 0.8125rem);
+}
+
+.g-slot {
+  background: var(--ef-signal, #fffa00);
+  color: var(--ef-on-signal, #161616);
+  padding: 0.2rem 0.5rem;
+  font-weight: 700;
+}
+
+.g-slot b {
+  font-family: var(--ef-font-mono, monospace);
+  margin-right: 0.4rem;
+}
+
+.g-kv {
+  background: color-mix(in srgb, var(--ef-panel, #fff) 78%, transparent);
+  border: 1px solid var(--ef-rule, #d9d9d6);
+  padding: 0.16rem 0.5rem;
+}
+
+.g-kv i {
+  font-style: normal;
+  color: var(--ef-ink-2, #5c5c5c);
+  margin-right: 0.4rem;
+  letter-spacing: 0.06em;
+}
+
+.g-kv b {
+  font-family: var(--ef-font-mono, monospace);
+  font-weight: 600;
+}
+
+.g-hint {
+  align-self: flex-start;
+  font-size: var(--ef-t-field, 0.8125rem);
+  color: var(--ef-ink-2, #5c5c5c);
+  background: color-mix(in srgb, var(--ef-panel, #fff) 72%, transparent);
+  padding: 0.25rem 0.55rem;
+  max-width: 46rem;
+}
+
+/* 准星 */
+.g-cross {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 15px;
+  height: 15px;
+  margin: -7.5px 0 0 -7.5px;
+  pointer-events: none;
+  opacity: 0.85;
+}
+
+.g-cross::before,
+.g-cross::after {
+  content: "";
+  position: absolute;
+  background: #101010;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55);
+}
+
+.g-cross::before {
+  left: 7px;
+  top: 0;
+  width: 1px;
+  height: 15px;
+}
+
+.g-cross::after {
+  top: 7px;
+  left: 0;
+  height: 1px;
+  width: 15px;
+}
+
+/* 点击加载的门面 */
+.g-gate {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  overflow: auto;
+  background: color-mix(in srgb, var(--ef-paper, #f4f4f2) 88%, transparent);
+  padding: var(--ef-pad, 1rem);
+}
+
+.g-gate-in {
+  max-width: 34rem;
+}
+
+.g-kicker {
+  font-family: var(--ef-font-ui, sans-serif);
+  font-size: var(--ef-t-field, 0.8125rem);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ef-ink-2, #5c5c5c);
+  margin: 0 0 0.5rem;
+}
+
+.g-h1 {
+  font-size: clamp(1.6rem, 4.6vw, 2.5rem);
+  line-height: 1.15;
+  margin: 0 0 0.7rem;
+}
+
+.g-note {
+  font-size: var(--ef-t-body, 1.0625rem);
+  line-height: 1.6;
+  margin: 0 0 1.1rem;
+  color: var(--ef-ink, #161616);
+}
+
+.g-play {
+  font-family: var(--ef-font-ui, sans-serif);
+  font-size: var(--ef-t-h2, 1.375rem);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0.7rem 1.6rem;
+  background: var(--ef-signal, #fffa00);
+  color: var(--ef-on-signal, #161616);
+  border: 1px solid var(--ef-ink, #161616);
+  cursor: pointer;
+  clip-path: polygon(0 0, calc(100% - 11px) 0, 100% 11px, 100% 100%, 11px 100%, 0 calc(100% - 11px));
+}
+
+.g-play:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.g-load {
+  margin-top: 1rem;
+  max-width: 24rem;
+}
+
+.g-bar {
+  height: 10px;
+  border: 1px solid var(--ef-ink, #161616);
+  background: var(--ef-panel, #fff);
+}
+
+.g-bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--ef-signal, #fffa00);
+  transition: width 0.2s linear;
+}
+
+.g-loadline {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  font-family: var(--ef-font-mono, monospace);
+  font-size: var(--ef-t-field, 0.8125rem);
+  color: var(--ef-ink-2, #5c5c5c);
+  margin-top: 0.35rem;
+}
+
+.g-keys {
+  margin: 1.4rem 0 0;
+  padding: 0 0 0 1.1rem;
+  font-size: var(--ef-t-field, 0.8125rem);
+  line-height: 1.7;
+  color: var(--ef-ink-2, #5c5c5c);
+}
+
+.g-keys b {
+  color: var(--ef-ink, #161616);
+}
+
+.g-fallback {
+  font-size: var(--ef-t-ui, 0.9375rem);
+  line-height: 1.6;
+  background: var(--ef-chip, #e4e4e0);
+  border-left: 3px solid var(--ef-danger, #b3261e);
+  padding: 0.6rem 0.8rem;
+}
+
+.g-fallback a {
+  color: inherit;
+}
+
+.g-foot {
+  flex: 0 0 auto;
+  padding: 0.5rem var(--ef-pad, 1rem);
+  border-top: 1px solid var(--ef-rule, #d9d9d6);
+  font-size: var(--ef-t-field, 0.8125rem);
+  color: var(--ef-ink-2, #5c5c5c);
+  background: var(--ef-panel, #fff);
+}
+
+.g-noscript {
+  padding: 2rem;
+  font-size: 1.1rem;
+}
+
+/* 手机：顶栏按钮挤成两行，提示文案换成触屏版 */
+@media (max-width: 720px) {
+  .g-stage {
+    padding: 0.45rem;
+  }
+
+  .g-tools {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .g-hud {
+    padding: 0.35rem 0.45rem;
+  }
+
+  .g-kv {
+    padding: 0.1rem 0.35rem;
+  }
+
+  .g-hint {
+    font-size: 0.72rem;
+  }
+}
+
+/* 减弱动画 */
+@media (prefers-reduced-motion: reduce) {
+  .g-bar i {
+    transition: none;
+  }
+}

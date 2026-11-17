@@ -1,0 +1,119 @@
+<!doctype html>
+<!-- 方块彩蛋的独立页。构建脚本把 wasm 和这份 HTML 一起拷进 static/game/，
+     于是 /game/ 就是一个自足的小页面，样式直接借用站点的 endfield.css。 -->
+<html lang="zh-CN" data-ef-variant="site">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="canonical" href="/game/" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>方块彩蛋 · SuYzz</title>
+    <meta name="description" content="Rust 写的浏览器单机方块小游戏：96×96 的岛，存档在你自己的浏览器里。" />
+    <meta name="robots" content="index,follow" />
+    <link rel="preload" as="font" crossorigin href="/assets/Saira.ttf" />
+    <script>try{var t=localStorage.getItem('theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;}catch(e){}</script>
+    <script src="/assets/variant.js"></script>
+    <link rel="stylesheet" href="/assets/endfield.css" />
+    <link rel="stylesheet" href="/assets/site.css" />
+    <link rel="stylesheet" href="./game.css" />
+    <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg" />
+  </head>
+  <body class="ef game-body">
+    <header class="g-top">
+      <a class="g-back" href="/">← 回站点</a>
+      <div class="g-title">方块彩蛋 <b>MCL1</b></div>
+      <div class="g-tools">
+        <button id="btn-export" class="g-btn" type="button" disabled>导出存档</button>
+        <button id="btn-import" class="g-btn" type="button" disabled>导入</button>
+        <button id="btn-reset" class="g-btn" type="button" disabled>清档重开</button>
+        <input id="file-import" type="file" accept=".mcl,.bin,.dat" hidden />
+      </div>
+    </header>
+
+    <main class="g-stage">
+      <div class="g-frame">
+        <!-- miniquad 的胶水脚本在加载时就会找 #glcanvas，所以 canvas 必须写在它前面 -->
+        <canvas id="glcanvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+
+        <!-- HUD 全在 DOM 里：中文字体清晰、零额外字体体积，canvas 只画方块 -->
+        <div class="g-hud" id="hud" hidden>
+          <div class="g-hud-line">
+            <span class="g-slot"><b id="hud-slot">1</b><span id="hud-block">草方块</span></span>
+            <span class="g-kv"><i>模式</i><b id="hud-mode">走</b></span>
+            <span class="g-kv"><i>时刻</i><b id="hud-clock">--:--</b></span>
+            <span class="g-kv"><i>改动</i><b id="hud-changed">0</b></span>
+            <span class="g-kv"><i>帧</i><b id="hud-fps">--</b></span>
+            <span class="g-kv g-save"><i>存档</i><b id="hud-save">读取中</b></span>
+          </div>
+          <div class="g-hint" id="hint-desktop">
+            WASD 移动 · 按住拖动转向 · 左键挖 · 右键放 · 1-9 换方块 · F 飞行 · Shift 加速 · 空格 跳
+          </div>
+          <div class="g-hint" id="hint-touch" hidden>
+            左半屏拖=走 · 右半屏拖=转 · 点一下=挖 · 按住=放 · 双击=飞行
+          </div>
+        </div>
+
+        <div class="g-cross" id="cross" hidden></div>
+
+        <div class="g-gate" id="gate">
+          <div class="g-gate-in">
+            <p class="g-kicker">Rust · macroquad · wasm · 纯单机</p>
+            <h1 class="g-h1">能在浏览器里挖方块的小彩蛋</h1>
+            <p class="g-note">
+              96×96 的岛和一座海。世界由种子现算，改动写进这个浏览器的 IndexedDB，
+              没有服务器、没有账号、不上传任何东西。
+            </p>
+            <button id="btn-play" class="g-play" type="button">点开玩</button>
+            <div class="g-load" id="load" hidden>
+              <div class="g-bar"><i id="bar-fill"></i></div>
+              <div class="g-loadline">
+                <span id="load-bytes">0 / ? KB</span>
+                <span id="load-state">正在下载 wasm</span>
+              </div>
+            </div>
+            <p class="g-fallback" id="fallback" hidden>
+              这台机器的浏览器跑不了 wasm 或脚本语法太新，玩不了这一版。
+              实现过程还是能看的：<a href="/p-2026-11-14-博客是怎么搭起来的.html">博客是怎么搭起来的</a>
+            </p>
+            <ul class="g-keys">
+              <li><b>桌面</b>：WASD 移动，按住鼠标拖动转向，左键挖、右键放，1-9 换方块</li>
+              <li><b>手机</b>：左半屏拖=走，右半屏拖=转，点一下挖、按住放</li>
+              <li><b>存档</b>：自动写浏览器本地，可以导出成 .mcl 文件发给别人</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="g-foot">
+      <span id="foot-note">改动每 3 秒自动存进本地 IndexedDB；清浏览器缓存会丢，要紧的话点「导出存档」。</span>
+    </footer>
+
+    <noscript>
+      <p class="g-noscript">这个彩蛋需要 JavaScript 和 WebAssembly。浏览器设置里关掉脚本就只剩这句话了。</p>
+    </noscript>
+
+    <script>
+      // 模块脚本加载失败（老内核解析不了新语法）时，gate 换成兜底文案。
+      // 老内核（微信安卓端常见 Chromium 77）连 module 标签都不报错，所以这里用 2 秒后再看一次。
+      window.__MCL_BOOTED = false;
+      window.addEventListener('error', function (e) {
+        var f = document.getElementById('fallback');
+        var g = document.getElementById('gate');
+        if (f && g && !window.__MCL_BOOTED) {
+          var b = document.getElementById('btn-play');
+          if (f) f.hidden = false;
+          if (b) b.style.display = 'none';
+        }
+      });
+      setTimeout(function () {
+        var f = document.getElementById('fallback');
+        var b = document.getElementById('btn-play');
+        if (!window.__MCL_BOOTED && f && b && !b.dataset.loaded) { f.hidden = false; }
+      }, 2500);
+    </script>
+    <!-- macroquad 的 WebGL 胶水 + 插件注册入口。构建脚本从当期 macroquad 版本里拷过来，
+         和 wasm 必须同一版本，否则胶水会报 "Version mismatch"。 -->
+    <script src="./mq_js_bundle.js"></script>
+    <script type="module" src="./loader.js"></script>
+  </body>
+</html>

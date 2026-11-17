@@ -294,3 +294,42 @@ GitHub runner 在 UTC，`build.py` 原来用 `date.today()`。北京时间早上
 ### 又踩一次的 shell 坑（两次了，写下来）
 
 `cd 目录 && nohup 命令 &` 里的 `&` 会把**整条** `A && B && C` 丢进后台子 shell：`cd` 只在子 shell 里生效，`$!` 也是那个子 shell 的 pid。后果有两个——后面的命令在**原来的目录**里跑（我因此找不到 `wdshot.py`），以及 `kill $!` 杀不掉里面那个 `http.server`（结果 8093 / 8095 各漏了一个服务在监听）。**规矩：要么用工具的 workdir 参数指定目录，要么 `cd 目录;`（分号）再 `nohup … &`；收尾时按 pid 验一遍 `ss -ltnp | grep 809`，别信 echo 出来的"服务已停"。**
+
+## 十二、方块彩蛋（2026-11-18 这轮做完并修好，已上线）
+
+上一轮把 Rust 小游戏写完、wasm 也编好了，但没提交、没上线、而且**其实跑不起来**（没人真验过）。这轮验了、修了、上线了。
+
+### 东西在哪、怎么动
+
+- 源码：`blog/game/src/*.rs`（Rust + macroquad 0.4，9 个文件约 3,300 行）。
+- 编 wasm：`cd blog/game && bash build-wasm.sh`（增量约 6 秒）。工具链在 `dsh_wechat/.cargo` 和 `dsh_wechat/.rustup`，脚本自己往上层找；`wasm32-unknown-unknown` 目标已装。产物自动拷进 `blog/static/game/`，wasm 文件名带内容哈希（防 CDN 吃旧版），`manifest.json` 里记着叫什么。
+- **CI 不需要 cargo**：`static/game/` 里存的就是编好的产物，`build.py` 把 `static/` 原样拷进 `dist/`（第 472-479 行那段）。改了 Rust 必须本机重编再提交，CI 不会编。
+- 自检：`python3 blog/gamecheck.py [输出png]`。**最后一行打 `PASS 彩蛋能跑能挖` 才算过**，它验五件事：WebGL2 在不在、`__MCL_BOOTED` 有没有置位、HUD 有没有在跳、门面收没收、往画布中心点一下 HUD「改动」会不会 +1（不 +1 = 输入没接到 wasm）。`GAME_W=414 GAME_H=820` 换窗口宽度；`GAME_URL=https://wkgn1.github.io/game/index.html?autoplay=1` 直接测线上。截图默认写 `/home/suyzz/blogshot/game-check.png`。
+- 入口（写死的，要挪就改这两处）：`templates/home.html` 里 hero 的「方块彩蛋」按钮、`templates/404.html` 右栏「藏了个东西」那一行。sitemap 里有 `game/index.html`，游戏页自己有 `rel="canonical" href="/game/"`（免得 `/game/` 和 `/game/index.html` 算两个地址）。
+
+### 这轮修掉的四个真 bug（每一个都会让彩蛋变成一具尸体）
+
+1. **wasm 名字定早了**：`loader.js` 的 `startGame()` 在读 `manifest.json` 之前就把 `url` 定成 `manifest.wasm || 'mc-lite.wasm'`，那时 `manifest` 还是 null → 永远请求兜底的 `mc-lite.wasm` → 404（文件名带哈希）。现在 url 挪到 manifest 到手之后再定。
+2. **macroquad 0.4.16 的保留贴图槽名**：`MaterialParams.textures` 里列 `"Texture"` 会直接 panic（`quad_gl.rs`："you can't use name `Texture` for your texture…"）。着色器里照写 `uniform sampler2D Texture;` 没问题，但**贴图要挂在 `Mesh.texture` 上**（`game.atlas` 存一份，建网格时 `texture: self.atlas.clone()`），每次 draw 自动占那个保留槽。图集 `Texture2D` 的 `Clone` 只是句柄拷贝，36 个网格各拿一份不贵。
+3. **`hidden` 属性被 CSS 顶掉**：`.g-gate`、`.g-hud` 都是 `display:flex`，作者样式会盖过 HTML `hidden` 的 UA 样式 → JS 收了半天画面上还盖着门面。`game.css` 现在有一条 `[hidden] { display: none !important; }`，这个页面所有靠 `hidden` 切换的面板都靠它。
+4. **没人置 `__MCL_BOOTED`**：`watchBoot()` 一直等这个变量，可它只在 HTML 里被置成 false → 门face 永不收、HUD 永不亮。现在 Rust 从 `Waiting` 进 `Running` 那一帧调 `mcl_booted()`。另外加了 `mcl_log()` + panic 钩子：**崩了会把"崩在哪一行、为什么"写进 console 和页面底部**（以前只会显示一句误导性的"这台机器的浏览器跑不了 wasm"——上一轮就是被这句话骗到的）。
+
+### 无头验证的要点（别再重新摸索）
+
+- 地址要带 `?autoplay=1`，不然脚本得去点「点开玩」按钮。
+- geckodriver 的 `POST /session/:id/se/log` 返回 **405**，拿不到浏览器日志；要查 wasm 里的事，靠页面早期挂 `window.addEventListener('error', …, true)` + `unhandledrejection` + 自己包一层 `console.*`（`/tmp/gdiag3.py` 是这个套路，没进仓库）。
+- 本机 headless Firefox 149 有 **webgl2**（软件渲染），所以这台机器能测；帧率 58–60。
+- 起步要 7–10 秒（wasm 下载 + 编译），所以"等 2.5 秒没动静就亮兜底文案"那个定时器会抢跑 —— 真跑起来之后必须把兜底收掉（`watchBoot` 里已加）。
+
+### 实测数字（2026-11-18 本机）
+
+- wasm 本体 **524,633 字节**，gzip **176,754** 字节（brotli 没装 brotli 命令，没量）。
+- 从打开到 HUD 亮：7–10 秒；HUD 帧率 58–60；`改动` 计数从 0 → 1（点一下真挖掉了）；存档写 IndexedDB 正常，HUD 上显示"已存档"。
+- 414 宽（手机宽度，headless 实际给了 500 宽）也能跑能挖，同一套结论。
+
+### 还没做 / 可以考虑
+
+1. **手机真触摸路径没自动化验过**：`read_touch` 有实现，但 headless 里没有 touch 事件；要验得在真机上玩一把（可以让用户手机打开 `https://wkgn1.github.io/game/` 试玩后反馈）。
+2. 没有音效、没有合成、没有怪物；存档只有"改了什么"，没记录玩家位置朝向？（`save.rs` 里有什么自己看一眼再说）。
+3. `game/target/` 300 MB、`dist-web/` 都是中间产物，已在 `game/.gitignore` 里，别提交。
+4. wasm 体积还能再压：`Saira.ttf` 476 KB 是站点最大的单个文件（彩蛋本身才 177 KB gzip）。

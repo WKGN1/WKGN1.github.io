@@ -1,0 +1,21 @@
+[package]
+name = "mc-lite"
+version = "0.1.0"
+edition = "2021"
+description = "博客上的方块小彩蛋：Rust + macroquad，编译成 wasm 在浏览器里单机玩"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+macroquad = "0.4"
+
+# 体积优先：wasm 是要给读者下载的，能省就省。
+# 存档不自己调 gzip：地形里全是长串重复，行程编码压得够狠。
+# （flate2 仍会经 macroquad→image→png 进依赖树，所以这不是体积优化，实测见 README。）
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+overflow-checks = false
+debug = false
+strip = true

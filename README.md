@@ -57,3 +57,16 @@ git add -A && git commit -m "写一篇" && git push    # 推到 GitHub 自动上
 - 这套样式**不含任何游戏素材**，颜色和形状都是自己做的一套 token，可以随便商用。
 - 字体 Saira 是 SIL OFL 1.1 授权（`assets/Saira-OFL.txt`），自托管没问题；中文正文用系统自带的黑体，所以断网也能开。
 - 公开的东西先假设所有人都会看到：单位全称、真实姓名、工号，写之前想清楚。
+
+## 方块彩蛋（game/）怎么改
+
+- 玩法代码在 `game/src/*.rs`（Rust + macroquad）。改完跑 `bash game/build-wasm.sh`（增量约 6 秒），
+  产物自动落到 `static/game/`；再 `python3 build.py`、提交推送就上线。**CI 不需要 Rust**——
+  仓库里存的就是编好的 wasm（`static/game/`），`build.py` 把 `static/` 原样拷进 `dist/`。
+- 想确认它真能跑：`python3 gamecheck.py`。这脚本会把 wasm 真开起来，等它进入可玩状态，
+  还会往画布中心点一下看「改动」计数会不会 +1，最后一行打 `PASS 彩蛋能跑能挖` 才算过。
+  换手机宽度：`GAME_W=414 GAME_H=820 python3 gamecheck.py`。直接测线上：
+  `GAME_URL=https://wkgn1.github.io/game/index.html?autoplay=1 python3 gamecheck.py`。
+- 入口文案写死在两处：`templates/home.html`（首页那颗「方块彩蛋」按钮）、
+  `templates/404.html`（右栏「藏了个东西」那行）。要去掉入口就删这两处。
+- 地址是 `/game/`。地址后加 `?autoplay=1` 会自动开跑（不用点「点开玩」），截图和自动化都用它。

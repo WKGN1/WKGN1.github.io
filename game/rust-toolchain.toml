@@ -1,0 +1,4 @@
+# 锁住工具链大版本：这个小彩蛋做完就不想跟着 Rust 版本一路修 API。
+# 有 rustup 的机器会自动用这个通道；发行版 cargo 会忽略这个文件。
+[toolchain]
+channel = "stable"

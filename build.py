@@ -500,6 +500,8 @@ def main():
         (out / "CNAME").write_text(dom + "\n", encoding="utf-8")
     # 站点地图里别出现草稿；地址一律 percent-encode（文章名可能是中文）
     urls = ["index.html", "posts.html", "kb.html", "about.html"] + [link(d) for d in docs if not d["draft"]]
+    if (out / "game" / "index.html").is_file():      # 方块彩蛋（static/game 拷来的）进地图，不进 RSS
+        urls.append("game/index.html")
     (out / "sitemap.xml").write_text(
         '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
         + "".join('<url><loc>%s</loc></url>\n' % xesc(abs_url(conf, p)) for p in urls) + "</urlset>\n",
