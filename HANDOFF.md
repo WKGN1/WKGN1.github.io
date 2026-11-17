@@ -271,3 +271,22 @@ curl -s -o /dev/null -w "%{http_code}\n" https://wkgn1.github.io/    # 期望 20
 GitHub runner 在 UTC，`build.py` 原来用 `date.today()`。北京时间早上 8 点前发布，首页那个 `<time>` 和"第 N 天"就会少一天——2026-11-17 07:5x 实测过：线上是 `2026.11.16 / 第 15 天`，本地是 `2026.11.17 / 第 16 天`。改成 `build.py` 顶部的 `today()`（按 CST，和 RSS 时间同一个来源）。**别把 `date.today()` 直接写回去。**
 
 顺带核对过字数：`wordcount()` 是"汉字按字计 + 拉丁按词计"，文章页、列表页、分类账、总数用的是同一个函数，2026-11-17 实测一致（No.005 986 字、No.002 537 字、No.003 232 字、两条笔记 152 / 156，合计 2,063）。**别在不同地方各写一套字数算法。**
+
+### 11-17 上午用户的三个决定，和照它们做的事
+
+1. **名字全都写实名**：模型 `swift-1.5-iq3_xxs`、文件全名 `Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS-00001-of-00002.gguf`（47,342,144,896 字节）+ `-00002-of-00002`（28,800,138,432）；引擎 **Strata**（`strata --version` 打 **0.1.59**，gfx906 那版自编，旧版留在 `strata.bak-0.1.48-20261111-…`）；桌面端 `Strata-0.2.11.AppImage`；命令行端 **dsh**。API key 和 `~/.config/mi50-gateway/lan-key` 仍然一律不上站。
+2. **No.003 重写成真记录**（文件名/地址没动）：现在是真实数字表 + 三个 bug 的实测数据，仍然顺手把写法全演示一遍。**还没有 `content/posts/_模板.md`**，要模板文件的话得单独建。
+3. **两条知识库条目也换成真数字版**：No.001 量化怎么选（真尺寸 + "只有 IQ3_XXS 一个版本，所以精度差没实测"这条写明了）、No.004 排查顺序（六步，每步一条真命令）。
+
+字数从 2,063 涨到 **3,247**（No.005 1,012 / No.003 757 / No.002 539 / 笔记 420 + 519）。
+
+### 这一轮新量到的数（下一轮要用别再量一遍）
+
+- `strata --version` = **0.1.59**；桌面端 AppImage 版本 **0.2.11**；备用小模型 `qwen3-0.6b-q4.gguf` = 396,705,472 字节。
+- `systemctl --user status strata-iq2xs.service` 的 journal：`Main process exited, code=killed, status=15/TERM`、"31.877 秒 wall clock 只吃 4.246 秒 CPU"。**教训：`Type=oneshot` + `RemainAfterExit` 的服务被监督进程 `stop` 之后 unit 会显示 failed，那不是崩了，别当故障追。**
+- 构建一次 **0.07–0.08 秒**（量三次）；Actions 从 push 到跑完 **23–29 秒**（六次实测），**跑完 8 秒后 curl 就已经是新内容**；`dist/` 8.6 MB，其中 `Saira.ttf` 476 KB 占大头（还没瘦身）。
+- 生成速度当天另外几条：43.4 / 40.9 tok/s（加上之前的 43.1 / 40.2 / 49.2）。
+
+### wdshot.py 的一处放宽（踩过就补）
+
+`document.fonts.status` 在某些页面上会一直挂在 `loading`，害得截图白报"没到位"。改成 `font_ready()`：status=loaded **或** `document.fonts.check('16px "Saira Variable"')` 为真都算到位，轮询从 10 秒加到 15 秒。同一张页面之前报"没到位"、现在 OK（实测过）。

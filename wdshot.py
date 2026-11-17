@@ -86,8 +86,16 @@ def ensure_driver(driver):
     return True, dv
 
 
-PROBE = ("var out={fonts:'?',iw:0,ih:0};try{out.fonts=document.fonts?document.fonts.status:'没有 document.fonts';}"
-         "catch(e){out.fonts='报错:'+e.name;} out.iw=window.innerWidth;out.ih=window.innerHeight;return out;")
+PROBE = ("var out={fonts:'?',okFont:false,iw:0,ih:0};"
+         "try{out.fonts=document.fonts?document.fonts.status:'没有 document.fonts';}catch(e){out.fonts='报错:'+e.name;}"
+         "try{out.okFont=!!(document.fonts&&document.fonts.check('16px \"Saira Variable\"'));}catch(e){out.okFont=false;}"
+         "out.iw=window.innerWidth;out.ih=window.innerHeight;return out;")
+
+
+def font_ready(got):
+    """字体到没到位。status=loaded 最理想；有些页面 status 会一直挂在 loading，
+       这时候看 check()——那才是"这个字体真能用了吗"的直接答案。"""
+    return got.get("fonts") == "loaded" or bool(got.get("okFont"))
 
 
 def capture(driver, url, out, width=1280, height=1000, verbose=True, attempts=3):
@@ -115,21 +123,22 @@ def capture(driver, url, out, width=1280, height=1000, verbose=True, attempts=3)
                 if ev("return document.readyState;", sid) in ("interactive", "complete"):
                     break
                 time.sleep(0.25)
-            for _ in range(40):                                   # 字体没到位就别拍：宽度会是假的
+            for _ in range(60):                                   # 字体没到位就别拍：宽度会是假的
                 got = ev(PROBE, sid)
-                if got["fonts"] == "loaded":
+                if font_ready(got):
                     break
                 time.sleep(0.25)
             time.sleep(0.35)                                      # 字体刚到位，再等一下让它真的画上
             got = ev(PROBE, sid)
             if verbose:
-                print("第 %d 次：窗口开 %dx%d → 内容 %dx%d｜字体 %s"
-                      % (n, width + dw, height + dh, got["iw"], got["ih"], got["fonts"]), flush=True)
+                print("第 %d 次：窗口开 %dx%d → 内容 %dx%d｜字体 %s%s"
+                      % (n, width + dw, height + dh, got["iw"], got["ih"], got["fonts"],
+                         "（check 说能用）" if got.get("okFont") and got["fonts"] != "loaded" else ""), flush=True)
             if (got["iw"], got["ih"]) == (width, height):
                 blob = base64.b64decode(call(driver, "GET", "/session/%s/screenshot" % sid)["value"])
                 with open(out, "wb") as fh:
                     fh.write(blob)
-                ok = got["fonts"] == "loaded" and png_size(blob) == (width, height)
+                ok = font_ready(got) and png_size(blob) == (width, height)
                 break
             dw, dh = width - got["iw"], height - got["ih"]
             try:
