@@ -290,3 +290,7 @@ GitHub runner 在 UTC，`build.py` 原来用 `date.today()`。北京时间早上
 ### wdshot.py 的一处放宽（踩过就补）
 
 `document.fonts.status` 在某些页面上会一直挂在 `loading`，害得截图白报"没到位"。改成 `font_ready()`：status=loaded **或** `document.fonts.check('16px "Saira Variable"')` 为真都算到位，轮询从 10 秒加到 15 秒。同一张页面之前报"没到位"、现在 OK（实测过）。
+
+### 又踩一次的 shell 坑（两次了，写下来）
+
+`cd 目录 && nohup 命令 &` 里的 `&` 会把**整条** `A && B && C` 丢进后台子 shell：`cd` 只在子 shell 里生效，`$!` 也是那个子 shell 的 pid。后果有两个——后面的命令在**原来的目录**里跑（我因此找不到 `wdshot.py`），以及 `kill $!` 杀不掉里面那个 `http.server`（结果 8093 / 8095 各漏了一个服务在监听）。**规矩：要么用工具的 workdir 参数指定目录，要么 `cd 目录;`（分号）再 `nohup … &`；收尾时按 pid 验一遍 `ss -ltnp | grep 809`，别信 echo 出来的"服务已停"。**
