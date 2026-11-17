@@ -12,6 +12,13 @@ ROOT = pathlib.Path(__file__).resolve().parent
 TPL = ROOT / "templates"
 TPL_CACHE = {}
 
+# 作者在北京这头，GitHub 的 runner 在 UTC。直接用 date.today() 的话，
+# 北京时间早上 8 点前发布会把"今天"和"第 N 天"少算一天（2026-11-17 实测到了）。
+CST = datetime.timezone(datetime.timedelta(hours=8))
+
+def today():
+    return datetime.datetime.now(CST).date()
+
 def tpl(name):
     if name not in TPL_CACHE:
         TPL_CACHE[name] = (TPL / name).read_text(encoding="utf-8")
@@ -196,7 +203,7 @@ def load(conf):
     days = 0
     if conf.get("since"):
         try:
-            days = (datetime.date.today() - datetime.date(*map(int, conf["since"].split("-")))).days
+            days = (today() - datetime.date(*map(int, conf["since"].split("-")))).days
         except Exception:
             days = 0
     cats = collections.OrderedDict()
@@ -276,7 +283,7 @@ def home(conf, docs, posts, notes, stats, built):
                             % ("kb.html" if ds[0]["kind"] == "note" else "posts.html", len(ds)))
 
     body = render("home.html",
-                  TODAY=fmt_date(datetime.date.today().isoformat()),
+                  TODAY=fmt_date(today().isoformat()),
                   DAYS=num(stats["days"]), DOCS=num(stats["docs"]), WORDS=num(stats["words"]),
                   NOTES=num(stats["notes"]), CATS=num(stats["cats"]),
                   SOLID=esc(conf["wordmark_solid"]), HOLLOW=esc(conf["wordmark_hollow"]),
@@ -377,7 +384,7 @@ def about_page(conf, docs, stats):
     return page("about", body, conf, "about.html", title="关于 · " + conf["brand"], fname="about.html")
 
 # -------------------------------------------------- 404 页 / 机器人 / RSS 订阅
-CST = datetime.timezone(datetime.timedelta(hours=8))   # 作者在这头，RSS 里的时间按这个算
+# CST（作者的时区）在文件开头定义，RSS 里的时间和"今天"都用它。
 
 def not_found(conf, docs, stats):
     """GitHub Pages 找不到页面时会端出 dist/404.html（用户站生效）。
@@ -447,7 +454,7 @@ def rss_feed(conf, docs, stats):
 # ---------------------------------------------------------------- main
 def main():
     conf = json.load(open(ROOT / "site.json", encoding="utf-8"))
-    built = datetime.date.today().isoformat()
+    built = today().isoformat()
     docs, posts, notes, stats = load(conf)
 
     out = ROOT / "dist"
