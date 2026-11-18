@@ -322,6 +322,15 @@ body {
   color: inherit;
 }
 
+/* 跑不起来时那一行原因：内容是不定长的报错文本，允许换行，颜色比正文淡一档 */
+.g-why {
+  margin: -0.4rem 0 0.95rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  opacity: 0.72;
+  word-break: break-word;
+}
+
 .g-foot {
   flex: 0 0 auto;
   padding: 0.5rem var(--ef-pad, 1rem);

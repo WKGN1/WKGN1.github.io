@@ -4,6 +4,10 @@
 // 没有 wasm-bindgen，也没有打包器，浏览器里跑的就是这几个文件本身。
 // 语法刻意保守（不用 ?. 和 ??）：微信安卓端的 X5 内核常见还是 Chromium 77。
 
+// 门面那段内联脚本靠这个变量判断「模块脚本到底执行了没有」，所以它必须是本文件最前面
+// 一句真正执行的代码（放在注释后面、任何可能出错的调用之前）。
+window.__MCL_LOADER_RAN = 1;
+
 var DB_NAME = 'mcl-lite';
 var DB_VERSION = 1;
 var STORE = 'save';
@@ -197,8 +201,14 @@ function registerBridge() {
         var m = decoder.decode(wasmView(ptr, len));
         window.__MCL_LOGS = (window.__MCL_LOGS || []).concat(m);
         console.warn('[彩蛋] ' + m);
-        // 启动阶段的话读者不用看，进 console 就够；崩了这种话必须让他看见。
-        if (m.indexOf('崩') >= 0 || m.indexOf('跑不了') >= 0) { try { say(m); } catch (e) {} }
+        // 启动阶段的话读者不用看，进 console 就够；崩了这种话必须写在门面上当原因——
+        // 他手机上出问题时，那一行是我们唯一的线索。
+        if (m.indexOf('崩') >= 0) {
+          showFallback(m);
+          try { say(m); } catch (e) {}
+        } else if (m.indexOf('跑不了') >= 0) {
+          try { say(m); } catch (e) {}
+        }
       };
 
       env.mcl_save_pending = function () { return pending; };
@@ -301,12 +311,22 @@ function startGame() {
 
 function showFallback(msg) {
   var f = $('fallback');
+  var w = $('fallback-why');
   var btn = $('btn-play');
-  if (f) {
-    f.hidden = false;
-    if (msg) f.textContent = msg;
+  if (f) f.hidden = false;
+  // 原因单独一行：手机上出问题时用户只要截图这一行就能告诉我到底哪儿不对。
+  if (w) {
+    w.hidden = false;
+    w.textContent = '原因：' + (msg || window.__MCL_ERR || '没留下原因') +
+      (window.__MCL_RES ? '｜另外 ' + window.__MCL_RES : '');
   }
-  if (btn) btn.style.display = 'none';
+  // 以前这里把按钮 display:none 一藏了之，用户连重试的入口都没了。
+  if (btn) {
+    btn.style.display = '';
+    btn.disabled = false;
+    btn.textContent = '刷新重试';
+    btn.onclick = function () { location.reload(); };
+  }
 }
 
 var HUD_IDS = ['hud-slot', 'hud-block', 'hud-mode', 'hud-clock', 'hud-changed', 'hud-fps', 'hud-save'];
@@ -333,6 +353,9 @@ function watchBoot() {
     // 真跑起来之后必须把它收掉，否则页面上一直挂着「这台机器的浏览器跑不了」。
     var fb = $('fallback');
     if (fb) fb.hidden = true;
+    // 万一之前冒过噪声报错（上游胶水那种），原因行也得跟着收掉，别留在页面上
+    var fbwhy = $('fallback-why');
+    if (fbwhy) fbwhy.hidden = true;
     var hud = $('hud');
     if (hud) hud.hidden = false;
     var cross = $('cross');

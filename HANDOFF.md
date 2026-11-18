@@ -333,3 +333,14 @@ GitHub runner 在 UTC，`build.py` 原来用 `date.today()`。北京时间早上
 2. 没有音效、没有合成、没有怪物；存档只有"改了什么"，没记录玩家位置朝向？（`save.rs` 里有什么自己看一眼再说）。
 3. `game/target/` 300 MB、`dist-web/` 都是中间产物，已在 `game/.gitignore` 里，别提交。
 4. wasm 体积还能再压：`Saira.ttf` 476 KB 是站点最大的单个文件（彩蛋本身才 177 KB gzip）。
+### 用户手机上打不开（2026-11-18 上午，微信里截图：门面盖着、按钮不见了、写着「这台机器的浏览器跑不了 wasm」）
+
+我看不见他的手机，所以这一轮把「页面自己把原因说出来」做掉了，以后他一截图我就能知道到底哪儿错。
+
+1. **门面里多了一行「原因」**（`#fallback-why`，样式 `.g-why`）：真跑不起来时写具体原因（报错文本 + 哪个文件第几行 + 顺带记录没加载上的资源）。`loader.js` 的 `showFallback()` 和内联脚本的 `mclFatal()` 都会填它；跑成功后 `watchBoot()` 会把它和兜底一起收掉。
+2. **「点开玩」按钮不再一藏了之**：以前出错就 `display:none`，用户连重试入口都没有；现在改成「刷新重试」并绑 `location.reload()`。
+3. **判死改成延时判定**：出错先记账（`window.__MCL_PENDING`），只有「模块脚本压根没执行」（内核不认 `type="module"`）或者「12 秒还没就绪且期间报过彩蛋自己的错」才亮兜底。原因：wasm 编译在旧手机上要十几秒，2.5 秒就宣判必误杀。
+4. **彩蛋不该被站点脚本连累**：内联脚本现在只把 `mq_js_bundle.js`、`loader.js` 和 `blob:`（wasm 运行时）的错算成彩蛋自己的错；`variant.js` 之类配色脚本挂了不算。
+5. **macroquad 0.4.16 胶水自带的真 bug**：quad_net 那段写的是 `register_plugin=function(e){...},miniquad_add_plugin({register_plugin,...})`，没 `var`，而整份胶水是 `"use strict"` → 每次加载都往 `window.onerror` 上扔 `ReferenceError: assignment to undeclared variable register_plugin`。挂掉的只有我们没用到的 quad_net，但它会把「跑不起来」的判定骗成假阳性。**`build-wasm.sh` 现在在拷出来的那份上补 `var`**（写法必须是「先单独声明再赋值」：`var register_plugin;register_plugin=...`；直接写 `var register_plugin=...,miniquad_add_plugin(...)` 会让后半句变成 var 列表里的非法项，整份胶水 SyntaxError——踩过一次，靠新的「原因」行当场抓到）。
+6. **回归脚本（没进仓库，`/tmp/gdiag4.py`）**：三种情形一起验——① 正常：booted、兜底藏好、原因行为空；② 站点脚本自己出错：彩蛋照样跑起来、不误报；③ 把 `window.WebAssembly` 抹掉：兜底露出、原因行写明「can't access property compileStreaming, WebAssembly is undefined」、按钮变「刷新重试」。三条全过才算好。
+7. 结论：**他手机上到底是哪一条，还等他再打开一次的截图**。要看的信息就在门面那行「原因」上。

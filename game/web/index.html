@@ -71,9 +71,11 @@
               </div>
             </div>
             <p class="g-fallback" id="fallback" hidden>
-              这台机器的浏览器跑不了 wasm 或脚本语法太新，玩不了这一版。
+              这一版在当前这个浏览器里没跑起来。下面那行原因请截图发我，我这边看不见你的手机。
               实现过程还是能看的：<a href="/p-2026-11-14-博客是怎么搭起来的.html">博客是怎么搭起来的</a>
             </p>
+            <!-- 真跑不起来时把具体原因写在这里：手机上出问题只能靠这一行字截图回来问 -->
+            <p class="g-why" id="fallback-why" hidden></p>
             <ul class="g-keys">
               <li><b>桌面</b>：WASD 移动，按住鼠标拖动转向，左键挖、右键放，1-9 换方块</li>
               <li><b>手机</b>：左半屏拖=走，右半屏拖=转，点一下挖、按住放</li>
@@ -93,23 +95,82 @@
     </noscript>
 
     <script>
-      // 模块脚本加载失败（老内核解析不了新语法）时，gate 换成兜底文案。
-      // 老内核（微信安卓端常见 Chromium 77）连 module 标签都不报错，所以这里用 2 秒后再看一次。
+      // 这一页「出错了怎么办」的中枢。语法必须比全站其它 JS 都老（不用箭头函数、const、
+      // 模板字符串、可选链）——它的活儿恰恰是在老内核上报告「哪里不对」。
+      // 三条规矩：
+      //   1) 站点自己的配色小脚本（variant.js 之类）出错，不该把彩蛋判死；
+      //   2) 判死也得写清原因（挂在 #fallback-why 上）：用户手机上出问题我看不见，只能靠这行字；
+      //   3) 用户还没点「点开玩」之前，别冒出「你这浏览器跑不了 wasm」这种吓人的话。
       window.__MCL_BOOTED = false;
-      window.addEventListener('error', function (e) {
+      window.__MCL_ERR = '';
+      window.__MCL_RES = '';
+
+      function mclIsGameFile(file) {
+        // 只有这几样的错才算彩蛋自己的错：胶水、加载器、以及 wasm 运行时（blob: 开头的报错）。
+        // 站点脚本（variant.js）、字体、css 的错不算，它们挂了彩蛋照样能玩。
+        return /mq_js_bundle|loader\.js|^blob:/i.test(String(file || ''));
+      }
+
+      function mclNote(where, text) {
+        if (!window[where]) window[where] = text;
+      }
+
+      function mclFatal(reason) {
         var f = document.getElementById('fallback');
-        var g = document.getElementById('gate');
-        if (f && g && !window.__MCL_BOOTED) {
-          var b = document.getElementById('btn-play');
-          if (f) f.hidden = false;
-          if (b) b.style.display = 'none';
-        }
-      });
-      setTimeout(function () {
-        var f = document.getElementById('fallback');
+        var w = document.getElementById('fallback-why');
         var b = document.getElementById('btn-play');
-        if (!window.__MCL_BOOTED && f && b && !b.dataset.loaded) { f.hidden = false; }
-      }, 2500);
+        if (f) f.hidden = false;
+        if (w) {
+          w.hidden = false;
+          w.textContent = '原因：' + reason + (window.__MCL_RES ? '｜另外 ' + window.__MCL_RES : '');
+        }
+        // 加载器压根没跑起来才需要换成「刷新重试」；跑起来了就别把按钮搞没。
+        if (b && !window.__MCL_LOADER_RAN) {
+          b.style.display = '';
+          b.disabled = false;
+          b.textContent = '刷新重试';
+          b.onclick = function () { location.reload(); };
+        }
+      }
+
+      // 出错先记账，不当场判死：wasm 编译本来就要好几秒，而且上游胶水自己就会冒一条
+      // 无害的 ReferenceError（build-wasm.sh 已经在补它），当场判死会把好的运行误杀。
+      window.addEventListener('error', function (e) {
+        var file = (e && e.filename) || '';
+        var msg = String((e && e.message) || e || '未知错误');
+        mclNote('__MCL_ERR', msg + (file ? ' @' + file.split('/').pop() + ':' + ((e && e.lineno) || '?') : ''));
+        if (!window.__MCL_BOOTED && mclIsGameFile(file)) window.__MCL_PENDING = window.__MCL_ERR;
+      });
+
+      // 资源类错误（字体、css、wasm 文件没拿到）只在捕获阶段看得见：记下来当线索，不判死。
+      window.addEventListener('error', function (e) {
+        var t = e && e.target;
+        if (t && t !== window) {
+          mclNote('__MCL_RES', (t.tagName || '元素') + ' ' + (t.src || t.href || '') + ' 没加载上');
+        }
+      }, true);
+
+      window.addEventListener('unhandledrejection', function (e) {
+        var r = e && e.reason;
+        mclNote('__MCL_ERR', 'Promise 里没接住的错：' + String((r && r.message) || r));
+      });
+
+      function mclCheck(deadline) {
+        if (window.__MCL_BOOTED) return;
+        // 模块脚本压根没执行过 = 内核不认 <script type="module"> 或脚本被拦，这才该判死。
+        // 执行过但人还没点「点开玩」：什么都没发生，别吓他。
+        if (!window.__MCL_LOADER_RAN) {
+          mclFatal(window.__MCL_ERR ||
+            'loader.js 这个模块脚本没执行：内核太旧（不支持 type="module"）或者脚本被拦了');
+          return;
+        }
+        // 跑起来了、12 秒还没就绪、期间又报过彩蛋自己的错：这时才判死。
+        // wasm 编译在旧手机上可能要十几秒，所以这条线拉得比 2.5 秒宽得多。
+        if (deadline >= 12000 && window.__MCL_PENDING) mclFatal(window.__MCL_PENDING);
+      }
+
+      setTimeout(function () { mclCheck(2500); }, 2500);
+      setTimeout(function () { mclCheck(12000); }, 12000);
     </script>
     <!-- macroquad 的 WebGL 胶水 + 插件注册入口。构建脚本从当期 macroquad 版本里拷过来，
          和 wasm 必须同一版本，否则胶水会报 "Version mismatch"。 -->

@@ -76,6 +76,32 @@ else
   exit 1
 fi
 
+# macroquad 0.4.16 的胶水自己有个 bug：quad_net 那段写成了
+#   register_plugin=function(e){...}
+# 没有 var，而整份胶水是 "use strict" —— 严格模式下给未声明的变量赋值直接
+# ReferenceError。它落在文件最后一个 IIFE 里，真正挂掉的只有 quad_net（我们没用），
+# 但这条错会冒到 window.onerror 上，把「这彩蛋跑不起来」的判定骗成假阳性
+# （实测：正常跑起来的那次也照报这条）。这里只改拷出来的那份。
+# 写法必须「先单独声明、再赋值」：原代码是 register_plugin=function(){...},miniquad_add_plugin({register_plugin,...})
+# 一整句逗号表达式，直接加 var 会让后半句变成 var 列表里的非法项，整份胶水 SyntaxError（踩过一次）。
+python3 - "$OUT/mq_js_bundle.js" <<'PY'
+import pathlib
+import sys
+
+p = pathlib.Path(sys.argv[1])
+t = p.read_text(encoding="utf-8")
+old = "register_plugin=function(e){e.env.ws_connect="
+new = "var register_plugin;register_plugin=function(e){e.env.ws_connect="
+if new in t:
+    print("==> 胶水 quad_net 那段已经有 var（补过）")
+elif old in t:
+    assert t.count(old) == 1, "quad_net 那段有好几处，得手工看一眼再补"
+    p.write_text(t.replace(old, new), encoding="utf-8")
+    print("==> 补掉胶水 quad_net 缺 var 的 bug（它会往 window.onerror 上扔 ReferenceError）")
+else:
+    print("==> 胶水版本里没有 quad_net 那段：升级 macroquad 后手工确认有没有同类写法", file=sys.stderr)
+PY
+
 # wasm 文件名带内容哈希：站点上就不会被 CDN 缓存成旧版
 HASH="$(sha256sum "$WASM" | cut -c1-10)"
 NAME="mc-lite.$HASH.wasm"
