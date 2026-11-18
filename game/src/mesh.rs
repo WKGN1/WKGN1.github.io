@@ -41,14 +41,18 @@ const NORMALS: [[i32; 3]; 6] = [
     [0, 0, 1],
 ];
 
+/// NORMALS 里底面（-Y）的下标，给 build_chunk 跳过世界底壳用。
+const FACE_BOTTOM: usize = 2;
+
 /// 各朝向的明暗：顶面最亮，底面最暗，侧面分两档，立体感全靠这组数字。
 const FACE_SHADE: [f32; 6] = [0.62, 0.62, 0.42, 1.0, 0.80, 0.80];
 
 /// AO 档位对应的亮度系数（0 最暗）。
 const AO_SHADE: [f32; 4] = [0.50, 0.68, 0.85, 1.0];
 
-/// 每个面的 4 个角（立方体局部坐标）+ 对应 UV + AO 取样偏移。
-/// corners[i] = (dx,dy,dz)，uvs[i] = (u,v)，ao 的两个切向偏移在 AO_TANGENT 里。
+/// 每个面的 4 个角（立方体局部坐标）+ 对应 UV。AO 的取样方向也从这儿读。
+/// corners[i] = (dx,dy,dz)，uvs[i] = (u,v)；这 4 个角是唯一的事实来源，
+/// ao_level 只从它们反推切向符号，不再另摆一张表（两张表早晚会对不上）。
 const CORNERS: [[[f32; 3]; 4]; 6] = [
     // -X
     [[0.0, 0.0, 1.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 1.0]],
@@ -74,25 +78,10 @@ const UVS: [[(f32, f32); 4]; 6] = [
 ];
 
 /// 每个面、每个角点的两个切向偏移（用来取 side1 / side2 / corner 三个邻居）。
-/// 顺序和 CORNERS 一致：(t1sign, t2sign)，切轴向在 AO_TANGENT_AXES 里给。
-const AO_TANGENTS: [[[i32; 2]; 4]; 6] = [
-    [[1, 1], [-1, 1], [-1, -1], [1, -1]],
-    [[1, -1], [1, 1], [-1, 1], [-1, -1]],
-    [[1, -1], [-1, -1], [-1, 1], [1, 1]],
-    [[-1, -1], [1, -1], [1, 1], [-1, 1]],
-    [[-1, -1], [1, -1], [1, 1], [-1, 1]],
-    [[1, -1], [-1, -1], [-1, 1], [1, 1]],
-];
-
-/// 每个面 AO 取样用的两个切向轴（法线之外的另外两轴）。
-const AO_TANGENT_AXES: [[usize; 2]; 6] = [
-    [2, 1],
-    [2, 1],
-    [0, 2],
-    [0, 2],
-    [0, 1],
-    [0, 1],
-];
+/// 这里**没有**手摆的符号表：符号直接从 CORNERS 那 4 个角读（见 ao_level）。
+/// 以前这儿写了一张 AO_TANGENTS + 一根 AO_TANGENT_AXES，六个面的符号和 CORNERS
+/// 反推出来的期望值全都对不上（每个面都沿一根切向轴左右镜像），后果是墙根那道黑边
+/// 跑到背离墙的一侧去了 —— 看着像「悬空的方块」。
 
 #[inline]
 fn solid_at(w: &World, x: i32, y: i32, z: i32) -> bool {
@@ -102,22 +91,39 @@ fn solid_at(w: &World, x: i32, y: i32, z: i32) -> bool {
 /// 算某个面某个角点的 AO 档位。
 fn ao_level(w: &World, cell: [i32; 3], face: usize, corner: usize) -> usize {
     let n = NORMALS[face];
-    let (a1, a2) = (AO_TANGENT_AXES[face][0], AO_TANGENT_AXES[face][1]);
-    let (s1, s2) = (
-        AO_TANGENTS[face][corner][0],
-        AO_TANGENTS[face][corner][1],
-    );
+    let local = CORNERS[face][corner];
+
+    // 法线之外的那两根轴就是切向轴；这个角点在某根切向轴上是靠「0 那一侧」还是
+    // 「1 那一侧」，CORNERS 里已经写死了（角点坐标只有 0.0 / 1.0），照抄就行。
+    // 判据和角点同源，所以不可能出现「面和取样方向各自一套」的那种镜像错。
+    let naxis = if n[0] != 0 {
+        0
+    } else if n[1] != 0 {
+        1
+    } else {
+        2
+    };
+    let mut axes = [0usize; 2];
+    let mut k = 0usize;
+    for a in 0..3 {
+        if a != naxis {
+            axes[k] = a;
+            k += 1;
+        }
+    }
+    let sgn = |a: usize| if local[a] > 0.5 { 1i32 } else { -1i32 };
+    let (s1, s2) = (sgn(axes[0]), sgn(axes[1]));
 
     // 先站到面外侧那一格，再沿两个切向分别看侧方块和角方块。
     let base = [cell[0] + n[0], cell[1] + n[1], cell[2] + n[2]];
 
     let mut p1 = base;
-    p1[a1] += s1;
+    p1[axes[0]] += s1;
     let mut p2 = base;
-    p2[a2] += s2;
+    p2[axes[1]] += s2;
     let mut pc = base;
-    pc[a1] += s1;
-    pc[a2] += s2;
+    pc[axes[0]] += s1;
+    pc[axes[1]] += s2;
 
     let side1 = solid_at(w, p1[0], p1[1], p1[2]);
     let side2 = solid_at(w, p2[0], p2[1], p2[2]);
@@ -178,6 +184,14 @@ pub fn build_chunk(w: &World, cx: i32, cz: i32, out: &mut ChunkMesh) {
                 let emissive = if b::is_emissive(id) { 1.0 } else { 0.0 };
 
                 for face in 0..6 {
+                    // 世界底壳（y=0 的 -Y 面）跳过：那层永远挖不穿（main.rs 禁止挖 y<=0），
+                    // 人也被 phys 里「y<0 一律挡」的规则关在世界之上，所以这些面一张都看不见。
+                    // 可 w.get(x,-1,z) 出界返回 AIR，face_visible 就把它们判成露面，
+                    // 于是每个区块白写 256 面 = 1024 顶点 + 1536 索引，
+                    // 白占的正是 drawcall 那份容量预算。
+                    if y == 0 && face == FACE_BOTTOM {
+                        continue;
+                    }
                     let n = NORMALS[face];
                     let nb = w.get(x + n[0], y + n[1], z + n[2]);
                     if !face_visible(id, nb) {
@@ -247,14 +261,64 @@ mod tests {
         w.dirty.iter_mut().for_each(|d| *d = false);
 
         let mut m = ChunkMesh::default();
-        // 中间的区块：朝上的一面 + 最底层朝下的一面（16x16 各 256 个面）。
+        // 中间的区块：只有朝上的那 256 个面。底面一个都不出（y=0 那层看不见，见 build_chunk）。
         build_chunk(&w, 3, 3, &mut m);
-        assert_eq!(m.vert_count(), (256 + 256) * 4);
-        assert_eq!(m.idx.len(), (256 + 256) * 6);
+        assert_eq!(m.vert_count(), 256 * 4);
+        assert_eq!(m.idx.len(), 256 * 6);
 
         // 角落区块：再多两个侧面（16 宽 x 10 高 = 160 各一面）。
         build_chunk(&w, 0, 0, &mut m);
-        assert_eq!(m.vert_count(), (256 + 256 + 160 + 160) * 4);
+        assert_eq!(m.vert_count(), (256 + 160 + 160) * 4);
+    }
+
+    /// 全空的地图（直接从 from_raw 灌，比一格格 set 快得多）。
+    fn empty_world() -> World {
+        let n = (crate::world::SX * crate::world::SY * crate::world::SZ) as usize;
+        World::from_raw(5, vec![b::AIR; n]).expect("长度对得上")
+    }
+
+    #[test]
+    fn 每个面每个角的_AO_取样都朝着它那一侧() {
+        // 只放一块斜挨着角点的遮挡块：按定义它该只让「同一个角」变暗，别的角不受影响。
+        // 以前切向符号是另摆的一张表，六个面全都和 CORNERS 反了一个轴，
+        // 于是每个面变暗的都是对角线上另一个角 —— 墙根的黑边跑到背离墙的那一侧。
+        for face in 0..6 {
+            let n = NORMALS[face];
+            let naxis = if n[0] != 0 {
+                0
+            } else if n[1] != 0 {
+                1
+            } else {
+                2
+            };
+            for corner in 0..4 {
+                let local = CORNERS[face][corner];
+                let mut w = empty_world();
+                let cell = [40, 20, 40];
+                w.set(cell[0], cell[1], cell[2], b::STONE);
+
+                let mut occ = [cell[0] + n[0], cell[1] + n[1], cell[2] + n[2]];
+                for a in 0..3 {
+                    if a != naxis {
+                        occ[a] += if local[a] > 0.5 { 1 } else { -1 };
+                    }
+                }
+                w.set(occ[0], occ[1], occ[2], b::STONE);
+
+                let dark: Vec<usize> = (0..4)
+                    .filter(|&c| ao_level(&w, cell, face, c) < 3)
+                    .collect();
+                assert_eq!(
+                    dark,
+                    vec![corner],
+                    "面 {} 的角 {}（局部 {:?}）：该它暗，实际暗的是 {:?}，取样方向反了",
+                    face,
+                    corner,
+                    local,
+                    dark
+                );
+            }
+        }
     }
 
     #[test]

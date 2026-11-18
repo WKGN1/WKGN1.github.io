@@ -8,6 +8,14 @@ body {
 }
 
 .game-body {
+  /* 整页钉死：body 只有 overflow:hidden 时，iOS 在顶栏/页脚拖一下会把整页连画布
+     一起橡皮筋弹出去（画布跟着抖一下，还顺手触发一次 resize → WebGL 重建）。 */
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--ef-paper, #f4f4f2);
@@ -16,6 +24,12 @@ body {
   overflow: hidden;
   overscroll-behavior: none;
   touch-action: none;
+  /* 手机端：「按住=放」正好是长按，iOS 会窜出蓝色选区和放大镜；
+     安卓微信每次点画布还会闪一块灰蓝高亮。门面和页脚下面单独把可选中写回来。 */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* hidden 属性必须赢过下面的 display 规则：HTML 的 hidden 只是 UA 样式里的
@@ -31,7 +45,12 @@ body {
   align-items: center;
   gap: 0.75rem;
   flex-wrap: wrap;
-  padding: 0.5rem var(--ef-pad, 1rem);
+  /* viewport-fit=cover 之后刘海/状态栏压在顶栏上（横屏时更明显），照着 endfield.css 的
+     .ef-topbar 把安全区垫回来 */
+  padding: calc(0.5rem + env(safe-area-inset-top, 0px))
+           calc(var(--ef-pad, 1rem) + env(safe-area-inset-right, 0px))
+           0.5rem
+           calc(var(--ef-pad, 1rem) + env(safe-area-inset-left, 0px));
   border-bottom: 1px solid var(--ef-rule, #d9d9d6);
   background: var(--ef-panel, #fff);
   font-family: var(--ef-font-ui, sans-serif);
@@ -108,29 +127,73 @@ body {
   min-height: 0;
   border: 1px solid var(--ef-ink, #161616);
   background: #9fc6e8;
-  overflow: hidden;
-  clip-path: polygon(0 0, calc(100% - var(--ef-cut, 7px)) 0, 100% var(--ef-cut, 7px), 100% 100%, var(--ef-cut, 7px) 100%, 0 calc(100% - var(--ef-cut, 7px)));
+  /* 原来这里用 clip-path 剪角：clip-path 连后代的命中测试一起剪，于是落在四个角上的
+     那一下点不到画布（左下角正是手机摇杆的起手位）。剪角改画在下面的 ::before 上，
+     canvas 的命中区域保持完整。overflow 交给 .g-hud 自己兜，这里不再剪。 */
+}
+
+/* 两个纸色三角盖在画面上，复刻原来那四个角各剪掉一个三角的样子；
+   -1px 是为了把边框那一圈也盖住（和原来 clip-path 连边框一起剪掉一致）。
+   pointer-events:none 保证它不吃点击。 */
+.g-frame::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  bottom: -1px;
+  left: -1px;
+  z-index: 3;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to top right, transparent 50%, var(--ef-paper, #f4f4f2) 50%),
+    linear-gradient(to bottom left, transparent 50%, var(--ef-paper, #f4f4f2) 50%);
+  background-position: top right, bottom left;
+  background-size: var(--ef-cut, 7px) var(--ef-cut, 7px);
+  background-repeat: no-repeat;
 }
 
 .g-frame canvas {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   width: 100% !important;
   height: 100% !important;
   display: block;
   touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* HUD */
 .g-hud {
   position: absolute;
-  inset: 0;
-  pointer-events: none;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  pointer-events: none; /* 按钮那一排在 .g-hud-btns 里单独开回来 */
   font-family: var(--ef-font-ui, sans-serif);
   padding: 0.6rem 0.8rem;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+  /* .g-frame 不再 overflow:hidden（不然剪角三角会被剪在 padding box 上，边框角补不回来），
+     HUD 内容挤不下时由这里兜住 */
+  overflow: hidden;
+}
+
+/* 上面一格（读数 + 手机端按钮）、下面一格（备注 + 操作提示）：
+   space-between 只看这两个包裹层，新增的东西不会跑到画面中间 */
+.g-hud-top,
+.g-hud-bottom {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
 }
 
 .g-hud-line {
@@ -139,6 +202,8 @@ body {
   gap: 0.4rem 0.9rem;
   align-items: baseline;
   font-size: var(--ef-t-field, 0.8125rem);
+  /* 帧率/改动那两格的数字位数一直在变，等宽数字 + 固定最小宽度才不会每 0.5 秒抖一下 */
+  font-variant-numeric: tabular-nums;
 }
 
 .g-slot {
@@ -150,6 +215,10 @@ body {
 
 .g-slot b {
   font-family: var(--ef-font-mono, monospace);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  display: inline-block;
+  min-width: 2.6ch;
   margin-right: 0.4rem;
 }
 
@@ -168,7 +237,60 @@ body {
 
 .g-kv b {
   font-family: var(--ef-font-mono, monospace);
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
+  display: inline-block;
+  min-width: 2.6ch;
+}
+
+/* Rust 推的第 8 段（飞行提示之类）。空的时候 JS 会把它 hidden 掉，不留空块。 */
+.g-hud-note {
+  align-self: flex-start;
+  font-size: var(--ef-t-field, 0.8125rem);
+  color: var(--ef-ink-2, #5c5c5c);
+  background: color-mix(in srgb, var(--ef-panel, #fff) 72%, transparent);
+  padding: 0.25rem 0.55rem;
+  max-width: 46rem;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 手机端入口那排按钮：HUD 整体是 pointer-events:none，这一排要能点 */
+.g-hud-btns {
+  pointer-events: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  /* 别被左半屏的拖拽手势吃掉点击 */
+  touch-action: manipulation;
+}
+
+.g-hud-btn {
+  font: inherit;
+  font-family: var(--ef-font-ui, sans-serif);
+  font-size: var(--ef-t-field, 0.8125rem);
+  letter-spacing: 0.04em;
+  color: var(--ef-ink, #161616);
+  /* 和 HUD 上其他小格子一套样式，不引新颜色 */
+  background: color-mix(in srgb, var(--ef-panel, #fff) 78%, transparent);
+  border: 1px solid var(--ef-rule, #d9d9d6);
+  padding: 0.3rem 0.6rem;
+  /* 指尖能点准的大小 */
+  min-height: 2.6rem;
+  min-width: 3rem;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.g-hud-btn:active {
+  background: var(--ef-signal, #fffa00);
+  color: var(--ef-on-signal, #161616);
+}
+
+.g-hud-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .g-hint {
@@ -217,16 +339,34 @@ body {
 /* 点击加载的门面 */
 .g-gate {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   display: flex;
-  align-items: center;
+  /* flex 垂直居中 + overflow:auto 是个经典坑：内容比容器高时溢出被压到上下两端，
+     而「顶部那块溢出」是滚不到的死区 —— 小屏/横屏时「刷新重试」「原因：…」正好在那儿。
+     改成靠顶 + 子元素 margin:auto 0：视觉上还是居中，但顶部能滚到。 */
+  align-items: flex-start;
   overflow: auto;
+  /* 祖先 .game-body 是 touch-action:none，浏览器算手势看的是整条祖先链，
+     于是手指下这个 overflow:auto 等于没有。这里明确只允许竖向拖。 */
+  touch-action: pan-y;
   background: color-mix(in srgb, var(--ef-paper, #f4f4f2) 88%, transparent);
   padding: var(--ef-pad, 1rem);
 }
 
 .g-gate-in {
   max-width: 34rem;
+  margin: auto 0; /* 配合 align-items:flex-start：仍然居中，但顶部可达 */
+  /* 报错那一行常常要靠长按复制回来问，门面里的文字要能选 */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 门面里的链接要保住 iOS 长按菜单（body 上为了按住=放关掉了 callout） */
+.g-gate-in a {
+  -webkit-touch-callout: default;
 }
 
 .g-kicker {
@@ -333,11 +473,33 @@ body {
 
 .g-foot {
   flex: 0 0 auto;
-  padding: 0.5rem var(--ef-pad, 1rem);
+  /* viewport-fit=cover 之后 iPhone 底部那 34px 正压在页脚上，而页脚是唯一能提示用户的地方 */
+  padding: 0.5rem calc(var(--ef-pad, 1rem) + env(safe-area-inset-right, 0px))
+           calc(0.5rem + env(safe-area-inset-bottom, 0px))
+           calc(var(--ef-pad, 1rem) + env(safe-area-inset-left, 0px));
   border-top: 1px solid var(--ef-rule, #d9d9d6);
   font-size: var(--ef-t-field, 0.8125rem);
+  /* 提示语（say()）一改，页脚高度就变 → 画布 flex:1 跟着变高 → resize → WebGL 重建，
+     画面闪一下卡一下。这里钉死成「两行」的高度（box-sizing:border-box），
+     一行还是两行都不动 layout。line-height 明确写死，3em 才真等于两行。 */
+  line-height: 1.5;
+  min-height: calc(3em + 1rem + 1px + env(safe-area-inset-bottom, 0px));
   color: var(--ef-ink-2, #5c5c5c);
   background: var(--ef-panel, #fff);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 导入用的 input：不能用 hidden（display:none 的 file input 在部分安卓 WebView 里
+   程序化 click() 打不开选择器），也不能用 accept（iOS 会因为 .mcl 这种自定义扩展名
+   把「文件」这一项灰掉）。离屏放着，看不见但还在渲染。 */
+.g-file {
+  position: fixed;
+  top: 0;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
 }
 
 .g-noscript {
@@ -356,8 +518,9 @@ body {
     width: 100%;
   }
 
+  /* 下面留够 0.55rem：比左下角那个剪角三角（7px）高一点，提示行不会被盖住 */
   .g-hud {
-    padding: 0.35rem 0.45rem;
+    padding: 0.35rem 0.45rem 0.55rem;
   }
 
   .g-kv {
@@ -366,6 +529,14 @@ body {
 
   .g-hint {
     font-size: 0.72rem;
+  }
+
+  /* 触屏上这四个按钮就是唯一的手柄，给足指尖大小 */
+  .g-hud-btn {
+    min-height: 2.75rem;
+    min-width: 3.25rem;
+    padding: 0.25rem 0.55rem;
+    font-size: 0.78rem;
   }
 }
 

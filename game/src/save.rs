@@ -6,11 +6,17 @@
 //! 所以不直接调它省的是「自己维护的代码」，不是 wasm 体积——体积结论以实测为准。
 //! 顺带一个好处：导出的文件能直接发给别人。
 
-use crate::world::World;
+use crate::world::{World, SX, SY, SZ};
 
 const MAGIC: &[u8; 4] = b"MCL1";
 const VERSION: u8 = 1;
 const MAX_RUN: u64 = 255;
+
+/// 头部：MAGIC(4) + VERSION(1) + seed(4) + raw_len(4) + body_len(4)。
+const HEADER: usize = 17;
+
+/// 世界体素数。raw_len 必须正好等于它，读回来才敢照着它分配内存。
+const RAW_LEN: u64 = SX as u64 * SY as u64 * SZ as u64;
 
 /// 行程编码：一串 (count, value)，count 1..=255。超过 255 的长串自动断开。
 fn rle_encode(data: &[u8]) -> Vec<u8> {
@@ -33,17 +39,25 @@ fn rle_decode(data: &[u8], expect_len: usize) -> Option<Vec<u8>> {
     if data.len() % 2 != 0 {
         return None;
     }
-    let mut out = Vec::with_capacity(expect_len);
+    // 别拿 expect_len 直接当容量：它是从文件里读出来的数，wasm32 的 usize 只有 32 位，
+    // 一句 with_capacity(4e9) 就能把整个页面顶爆。上限夹一下，真不够 resize 会自己长。
+    let mut out = Vec::with_capacity(expect_len.min(1 << 20));
     let mut pairs = data.chunks_exact(2);
     while let Some(p) = pairs.next() {
         let (n, v) = (p[0] as usize, p[1]);
         if n == 0 {
             return None; // count 为 0 一定是坏数据
         }
-        if out.len() + n > expect_len {
+        // 这里也不能裸加：32 位 usize + 关了溢出检查，越界不会 panic 而是回绕成小数，
+        // 于是「超长」这条判据会失效，坏数据就被放过去了。
+        let next = match out.len().checked_add(n) {
+            Some(v) => v,
+            None => return None,
+        };
+        if next > expect_len {
             return None; // 超长，说明文件被截断或被改坏
         }
-        out.resize(out.len() + n, v);
+        out.resize(next, v);
     }
     if out.len() != expect_len {
         return None;
@@ -74,16 +88,29 @@ pub enum LoadError {
 
 /// 解包。坏数据一律返回 Err，让调用方回落到「按 seed 新建世界」。
 pub fn decode(bytes: &[u8]) -> Result<(u32, Vec<u8>), LoadError> {
-    if bytes.len() < 17 || &bytes[0..4] != MAGIC || bytes[4] != VERSION {
+    if bytes.len() < HEADER || &bytes[0..4] != MAGIC || bytes[4] != VERSION {
         return Err(LoadError::BadFormat);
     }
     let seed = u32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]);
-    let raw_len = u32::from_le_bytes([bytes[9], bytes[10], bytes[11], bytes[12]]) as usize;
-    let body_len = u32::from_le_bytes([bytes[13], bytes[14], bytes[15], bytes[16]]) as usize;
-    if bytes.len() < 17 + body_len {
+    // 长度全部在 u64 上算完再比。wasm32 的 usize 是 32 位、release 又关了溢出检查：
+    // body_len 是 0xFFFFFFFF 时「17 + body_len」回绕成 16，检查被放行，
+    // 紧接着那个切片 bytes[17..17+body_len] 就从 17 越到 16 → panic。
+    // panic=abort 的 wasm 里那就是 trap：主循环连一帧都不续，画面冻住，刷新还冻。
+    let raw_len = u32::from_le_bytes([bytes[9], bytes[10], bytes[11], bytes[12]]) as u64;
+    let body_len = u32::from_le_bytes([bytes[13], bytes[14], bytes[15], bytes[16]]) as u64;
+    let total = (HEADER as u64).checked_add(body_len).ok_or(LoadError::BadFormat)?;
+    if (bytes.len() as u64) < total {
         return Err(LoadError::BadFormat);
     }
-    let raw = rle_decode(&bytes[17..17 + body_len], raw_len).ok_or(LoadError::WrongSize)?;
+    let body_len = body_len as usize; // 到这儿 body_len <= bytes.len() - HEADER，截断是安全的
+
+    // raw_len 也必须核：它是 rle_decode 的期望长度（以前完全没查）。
+    // 核成「正好等于体素数」之后，expect_len 就不可能是几十亿，with_capacity 那条风险也一并没了。
+    if raw_len != RAW_LEN {
+        return Err(LoadError::WrongSize);
+    }
+    let raw = rle_decode(&bytes[HEADER..HEADER + body_len], raw_len as usize)
+        .ok_or(LoadError::WrongSize)?;
     Ok((seed, raw))
 }
 
@@ -130,6 +157,28 @@ mod tests {
         let (seed, raw) = decode(&bytes).unwrap();
         assert_eq!(seed, w2.seed);
         assert_eq!(raw, w2.take_bytes());
+
+        // body_len 写成 u32 最大值：32 位 usize 上「17 + body_len」回绕成 16，
+        // 那条长度检查被放行，接着的切片 [17..16] 直接 panic（wasm 里就是整个彩蛋掐死）。
+        let mut wrap = Vec::new();
+        wrap.extend_from_slice(MAGIC);
+        wrap.push(VERSION);
+        wrap.extend_from_slice(&1234u32.to_le_bytes());
+        wrap.extend_from_slice(&(RAW_LEN as u32).to_le_bytes());
+        wrap.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+        wrap.extend_from_slice(&[1, 2, 3]);
+        assert!(
+            matches!(decode(&wrap), Err(LoadError::BadFormat)),
+            "body_len 回绕该报错，不该 panic"
+        );
+
+        // raw_len 被改坏：它是 rle_decode 的期望长度，也决定 with_capacity 的量。
+        let mut bad_raw = encode(&w);
+        bad_raw[9..13].copy_from_slice(&((RAW_LEN as u32) ^ 0xFFFF_FFFF).to_le_bytes());
+        assert!(
+            matches!(decode(&bad_raw), Err(LoadError::WrongSize)),
+            "raw_len 不对时必须报错，不能照着它分配内存"
+        );
     }
 
     #[test]

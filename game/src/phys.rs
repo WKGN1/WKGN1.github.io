@@ -71,9 +71,15 @@ impl Player {
     ) {
         let dt = dt.min(0.05); // 切后台回来 dt 会很大，钳一下免得一步穿墙
 
-        let foot = w.water_at(self.pos[0], self.pos[1] + 0.2, self.pos[2]);
+        // 在水里怎么判定：脚底那一格 + 身体中部 + 眼睛，三个点。
+        // 原来只有 +0.2 和眼睛两个点，于是脚底那格反而经常没采到 —— 脚在 15.85 这种
+        // 位置时 +0.2 已经翻到上面那格（空气），眼睛更高两格也是空气，整个人明明浸在水里
+        // 却按陆地物理走：浅水里跳不起、游上岸一卡一卡、HUD 在「行走/游泳」之间乱闪。
+        // 低那个点贴着脚（+0.05）才是「脚底那格」，中间那个补上腰以下的空洞。
+        let foot = w.water_at(self.pos[0], self.pos[1] + 0.05, self.pos[2]);
+        let waist = w.water_at(self.pos[0], self.pos[1] + 0.9, self.pos[2]);
         let head = w.water_at(self.pos[0], self.pos[1] + EYE_HEIGHT, self.pos[2]);
-        self.in_water = foot || head;
+        self.in_water = foot || waist || head;
 
         let want_speed = if self.fly {
             FLY_SPEED
@@ -138,9 +144,13 @@ impl Player {
         self.move_axis(w, self.vel[1] * dt, 1);
 
         if self.pos[1] < -20.0 {
-            // 理论上不该发生（第 0 层是实心底），真发生了就当掉出世界，回出生点下方。
-            self.pos[1] = 30.0;
-            self.vel[1] = 0.0;
+            // 理论上不该发生（第 0 层挖不穿），真发生了就当掉出世界。
+            // 以前只把 y 硬写成 30.0、x/z 原地不动：那格很可能是山体里的石头，
+            // 人被塞进石头之后分轴解算往哪边贴都不对，等于卡死。
+            // 现在站到同一列的地表之上（x/z 是玩家自己选的，别改），速度整个清零。
+            let h = w.top_solid(self.pos[0].floor() as i32, self.pos[2].floor() as i32);
+            self.pos[1] = (h.max(0) + 1) as f32;
+            self.vel = [0.0, 0.0, 0.0];
         }
         if self.pos[1] > crate::world::SY as f32 + 40.0 {
             self.pos[1] = crate::world::SY as f32 + 40.0;

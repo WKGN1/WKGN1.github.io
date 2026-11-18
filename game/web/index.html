@@ -5,7 +5,9 @@
   <head>
     <meta charset="utf-8" />
     <link rel="canonical" href="/game/" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <!-- maximum-scale/user-scalable 是给老 iOS（≤12 完全无视 touch-action）兜底：不然双击
+       会被浏览器吃成放大整页，画布跟着抖。代价：系统级的无障碍缩放在这一页也被限住。 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <title>方块彩蛋 · SuYzz</title>
     <meta name="description" content="Rust 写的浏览器单机方块小游戏：96×96 的岛，存档在你自己的浏览器里。" />
     <meta name="robots" content="index,follow" />
@@ -25,7 +27,10 @@
         <button id="btn-export" class="g-btn" type="button" disabled>导出存档</button>
         <button id="btn-import" class="g-btn" type="button" disabled>导入</button>
         <button id="btn-reset" class="g-btn" type="button" disabled>清档重开</button>
-        <input id="file-import" type="file" accept=".mcl,.bin,.dat" hidden />
+        <!-- 不用 hidden：display:none 的 input 在部分安卓 WebView 里程序化 click() 打不开选择器，
+             所以改成离屏定位（见 game.css 的 .g-file）。也不写 accept：iOS 的选择器会因为
+             .mcl 这种自定义扩展名把「文件」这一项灰掉。 -->
+        <input id="file-import" class="g-file" type="file" tabindex="-1" />
       </div>
     </header>
 
@@ -35,20 +40,35 @@
         <canvas id="glcanvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
 
         <!-- HUD 全在 DOM 里：中文字体清晰、零额外字体体积，canvas 只画方块 -->
+        <!-- 首帧 HUD 是 Rust 推的「1|草方块|等待|06:00|0|--|读取存档|正在读本地 IndexedDB」，
+             这里的初值跟它对齐，免得门面收起后先闪一下另一套文案。 -->
         <div class="g-hud" id="hud" hidden>
-          <div class="g-hud-line">
-            <span class="g-slot"><b id="hud-slot">1</b><span id="hud-block">草方块</span></span>
-            <span class="g-kv"><i>模式</i><b id="hud-mode">走</b></span>
-            <span class="g-kv"><i>时刻</i><b id="hud-clock">--:--</b></span>
-            <span class="g-kv"><i>改动</i><b id="hud-changed">0</b></span>
-            <span class="g-kv"><i>帧</i><b id="hud-fps">--</b></span>
-            <span class="g-kv g-save"><i>存档</i><b id="hud-save">读取中</b></span>
+          <div class="g-hud-top">
+            <div class="g-hud-line">
+              <span class="g-slot"><b id="hud-slot">1</b><span id="hud-block">草方块</span></span>
+              <span class="g-kv"><i>模式</i><b id="hud-mode">等待</b></span>
+              <span class="g-kv"><i>时刻</i><b id="hud-clock">06:00</b></span>
+              <span class="g-kv"><i>改动</i><b id="hud-changed">0</b></span>
+              <span class="g-kv"><i>帧</i><b id="hud-fps">--</b></span>
+              <span class="g-kv g-save"><i>存档</i><b id="hud-save">读取存档</b></span>
+            </div>
+            <!-- 手机端入口：点一下置标志，Rust 每帧 take 走（取走即清）。只在摸到屏之后显出来。 -->
+            <div class="g-hud-btns" id="hud-btns" hidden>
+              <button id="btn-jump" class="g-hud-btn" type="button">跳</button>
+              <button id="btn-fly" class="g-hud-btn" type="button">飞</button>
+              <button id="btn-slot-prev" class="g-hud-btn" type="button" aria-label="上一个方块">‹ 上一个</button>
+              <button id="btn-slot-next" class="g-hud-btn" type="button" aria-label="下一个方块">下一个 ›</button>
+            </div>
           </div>
-          <div class="g-hint" id="hint-desktop">
-            WASD 移动 · 按住拖动转向 · 左键挖 · 右键放 · 1-9 换方块 · F 飞行 · Shift 加速 · 空格 跳
-          </div>
-          <div class="g-hint" id="hint-touch" hidden>
-            左半屏拖=走 · 右半屏拖=转 · 点一下=挖 · 按住=放 · 双击=飞行
+          <div class="g-hud-bottom">
+            <!-- Rust 推的第 8 段：飞行提示之类。空的时候这边会把它收掉，别挂个空块 -->
+            <div class="g-hud-note" id="hud-note">正在读本地 IndexedDB</div>
+            <div class="g-hint" id="hint-desktop">
+              WASD 移动 · 按住拖动转向 · 左键挖 · 右键放 · 1-9 换方块 · F 飞行 · Shift 加速 · 空格 跳
+            </div>
+            <div class="g-hint" id="hint-touch" hidden>
+              左半屏拖=走 · 右半屏拖=转 · 点一下=挖 · 按住=放 · 双击=飞行 · 跳/飞/换方块用上面那排按钮
+            </div>
           </div>
         </div>
 
@@ -77,8 +97,8 @@
             <!-- 真跑不起来时把具体原因写在这里：手机上出问题只能靠这一行字截图回来问 -->
             <p class="g-why" id="fallback-why" hidden></p>
             <ul class="g-keys">
-              <li><b>桌面</b>：WASD 移动，按住鼠标拖动转向，左键挖、右键放，1-9 换方块</li>
-              <li><b>手机</b>：左半屏拖=走，右半屏拖=转，点一下挖、按住放</li>
+              <li><b>桌面</b>：WASD 移动，按住鼠标拖动转向，左键挖、右键放，1-9 换方块，F 飞行，空格跳</li>
+              <li><b>手机</b>：左半屏拖=走，右半屏拖=转，点一下=挖，按住=放，双击=飞行；HUD 上另有「跳」「飞」和上一个/下一个方块四个按钮</li>
               <li><b>存档</b>：自动写浏览器本地，可以导出成 .mcl 文件发给别人</li>
             </ul>
           </div>
@@ -115,6 +135,14 @@
         if (!window[where]) window[where] = text;
       }
 
+      function mclRetryHref() {
+        // 裸 reload 撞上的还是同一份缓存（GitHub Pages 对这些文件发 max-age=600），
+        // 坏掉的 wasm/manifest 重试 N 次都是同一个错。加时间戳参数换个地址。
+        var q = location.search || '';
+        var h = location.hash || '';
+        return location.pathname + q + (q ? '&' : '?') + 'retry=' + Date.now() + h;
+      }
+
       function mclFatal(reason) {
         var f = document.getElementById('fallback');
         var w = document.getElementById('fallback-why');
@@ -124,12 +152,16 @@
           w.hidden = false;
           w.textContent = '原因：' + reason + (window.__MCL_RES ? '｜另外 ' + window.__MCL_RES : '');
         }
+        // 跑成功时门面整个被藏了；之后再判死就得把它重新显出来，否则原因藏在
+        // 一个 display:none 的父节点里，等于没写。
+        var g = document.getElementById('gate');
+        if (g && g.hidden && window.__MCL_BOOTED) g.hidden = false;
         // 加载器压根没跑起来才需要换成「刷新重试」；跑起来了就别把按钮搞没。
         if (b && !window.__MCL_LOADER_RAN) {
           b.style.display = '';
           b.disabled = false;
           b.textContent = '刷新重试';
-          b.onclick = function () { location.reload(); };
+          b.onclick = function () { location.replace(mclRetryHref()); };
         }
       }
 

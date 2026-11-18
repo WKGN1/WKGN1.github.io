@@ -329,7 +329,7 @@ GitHub runner 在 UTC，`build.py` 原来用 `date.today()`。北京时间早上
 
 ### 还没做 / 可以考虑
 
-1. **手机真触摸路径没自动化验过**：`read_touch` 有实现，但 headless 里没有 touch 事件；要验得在真机上玩一把（可以让用户手机打开 `https://wkgn1.github.io/game/` 试玩后反馈）。
+1. **手机端触摸**：挖 / 放 / 摇杆走路 / 双击飞行 / 三个 HUD 按钮都已经自动化验过了（`game/regress.py touch`，用 `TouchObject` + `totalTouchPoints` 自己造触点、`dom.w3c_touch_events.enabled=1`）。剩一件事无头验不了：**"是触屏设备才把这三排按钮显出来"的判据在真机上成不成立** —— 无头 Firefox 压根报不出触屏能力（见下面「测试自己的坑」最后一条）。真机反馈还得等用户手机打开 `https://wkgn1.github.io/game/`。
 2. 没有音效、没有合成、没有怪物；存档只有"改了什么"，没记录玩家位置朝向？（`save.rs` 里有什么自己看一眼再说）。
 3. `game/target/` 300 MB、`dist-web/` 都是中间产物，已在 `game/.gitignore` 里，别提交。
 4. wasm 体积还能再压：`Saira.ttf` 476 KB 是站点最大的单个文件（彩蛋本身才 177 KB gzip）。
@@ -344,3 +344,37 @@ GitHub runner 在 UTC，`build.py` 原来用 `date.today()`。北京时间早上
 5. **macroquad 0.4.16 胶水自带的真 bug**：quad_net 那段写的是 `register_plugin=function(e){...},miniquad_add_plugin({register_plugin,...})`，没 `var`，而整份胶水是 `"use strict"` → 每次加载都往 `window.onerror` 上扔 `ReferenceError: assignment to undeclared variable register_plugin`。挂掉的只有我们没用到的 quad_net，但它会把「跑不起来」的判定骗成假阳性。**`build-wasm.sh` 现在在拷出来的那份上补 `var`**（写法必须是「先单独声明再赋值」：`var register_plugin;register_plugin=...`；直接写 `var register_plugin=...,miniquad_add_plugin(...)` 会让后半句变成 var 列表里的非法项，整份胶水 SyntaxError——踩过一次，靠新的「原因」行当场抓到）。
 6. **回归脚本（没进仓库，`/tmp/gdiag4.py`）**：三种情形一起验——① 正常：booted、兜底藏好、原因行为空；② 站点脚本自己出错：彩蛋照样跑起来、不误报；③ 把 `window.WebAssembly` 抹掉：兜底露出、原因行写明「can't access property compileStreaming, WebAssembly is undefined」、按钮变「刷新重试」。三条全过才算好。
 7. 结论：**他手机上到底是哪一条，还等他再打开一次的截图**。要看的信息就在门面那行「原因」上。
+
+### 这轮（11-18 晚）：他自己只说了「bug 不少」，清单是我自己找出来的
+
+先说两句要紧的：**「挖了不重画」和「右键放不下去」最后都不是产品 bug，是我那套无头测试自己没准备好**（坑全写在下面「测试自己的坑」）；真正修掉的是这八条。
+
+1. **`watchBoot()` 定义了却没人调用**。`loader.js` 尾部只调了 `registerBridge / loadSave / wireButtons / drainNote`，`watchBoot()` 挂着没人管 → 门面永远不收、HUD 永远带着 `hidden`、八格内容冻在「等待 / 06:00 / 帧 0」、第 8 段（备注）永远没人显示。补一行 `watchBoot();` 之后时刻在走、模式随 F 变、帧率 60、备注弹得出来。我是往页面上挂 MutationObserver 数 HUD 相关的 DOM 改动确认的：修前 30 秒 0 次，修后同样 30 秒 34 次。
+2. **「改动」计数不跟着存档走**：`world::from_raw` 把 `changed` 写死成 0 → 刷新之后画面上「改动 0」，可坑明明还在（看着就像"你的改动没存上"）。现在 `from_raw` 拿 `World::new(seed)` 当基准逐格比，不一样就 +1（世界体 128×32×128，比对一次几毫秒）。
+3. **在画布外面松手，鼠标键状态会卡住**：胶水的 `mouseup/pointerup` 只绑在画布上，跑着的时候在顶栏、页脚或者画布外头松手，macroquad 那边永远看不到松手 → 之后光是动一下鼠标，视角就自己转。`loader.js` 在 `window` 上捕获相加了 `forwardOutsideUp`：不是画布上收到的松手就原样转交给画布（画布自己收到的不转，免得处理两遍）。实测修前松手后挪 6 下鼠标、画面中心像素和变了 4073（判"画面重画"的阈值是 4000），修后 0。
+4. **触屏被同时当成鼠标，点一下挖两格**：`read_touch` 除了触摸还派发模拟鼠标事件，一次轻点先走触摸一遍再走鼠标一遍。现在触摸只走触摸。顺带把说明里写了但代码里没有的**双击开/关飞行**做了，摇杆方向也修了（屏幕向上 = 朝当前朝向前进，和键盘共用那套 yaw 基），按住左半屏走路不再顺手把视角拖走。
+5. **手机端没有跳/飞/换方块的入口**（手机上没有键盘，而这三件事原来只有按键）。`index.html` 加了 `#btn-jump / #btn-fly / #btn-slot-prev / #btn-slot-next`，走三个新的 wasm 导入 `mcl_take_jump / mcl_take_fly / mcl_take_slot`（槽位是**带符号的增量**）。要紧的写法：这三个 take 每帧都得各读一次、读完清零，**不能写成 `a || b` 那种短路**，否则前一个没消费后一个就永远读不到。实测点「跳」y 18.00→19.08，点「下一个」槽位 1→2（泥土），点「飞」模式切飞行。
+6. **触屏判据太窄**：原来只有 `'ontouchstart' in window || maxTouchPoints > 0`，现在加了 `matchMedia('(any-pointer: coarse)')` —— 带触屏的笔记本、平板、一些国产 WebView 前两个都是空的。
+7. **「wasm 起不来」那个模拟原来是假的**（测试侧，但坑很典型）：原来用 `defineProperty` 截 `window.load`，可胶水的 `load` 是**函数声明**、不是赋值，截不住 —— 实测 `__MCL_BOOTED` 照样置位，等于什么都没模拟。改成把 `WebAssembly.compile / compileStreaming / instantiate / instantiateStreaming` 换成必然失败的 promise，这才是"胶水自己 `.catch(e => console.error(e))`、页面上一个字都不说"那一幕。现在 22 秒上门面就写明「原因：wasm 没起来：模拟胶水失败：wasm 起不来」，按钮从灰的「加载中」变成能点的「刷新重试」。
+8. **手机上那些细节这轮才真做完**：画布 `position:fixed`（不被 iOS 橡皮筋的 scrollY 带着跳）；关掉 `-webkit-touch-callout` / `user-select` / `tap-highlight`（长按不窜选区）；`env(safe-area-inset-*)` 补刘海和圆角；`maximum-scale=1` 禁双击缩放；`.g-frame` 原来的 `clip-path` **连画布四个角的点击一起剪掉**（改成在背景层画两块纸色三角形，画布本身不吃剪，四个角都留得住）；页脚给最小高度（提示文案一长就别把画布顶得重建 GL）；HUD 数字用 `font-variant-numeric: tabular-nums` 不抖行；门面顶部可达 + `touch-action:pan-y`。
+
+另外这轮还并掉了两处重复：脏表原来有两份（`world.dirty` 和 main.rs 里一份），现在只有 `world.dirty`，由 `rebuild_dirty_chunks` 消费；`mesh.rs` 里 y=0 的底面不再生成（看不见但吃索引）。索引缓冲区显式扩到 `gl_set_drawcall_buffer_capacity(16000, 12000)`：默认 5000 条会被截，macroquad 只是每帧 console.warn 一句 `clamping index write ... exceeded max drawcall index 2`，**表现是远处偶发一条看穿天空的缺面**，特别容易被当成"渲染有 bug"。旧版一轮实测 397 条警告，现在 0。
+
+### 测试自己的坑（下次别再重新踩）
+
+- **macroquad 的输入是跨帧的**：按下要被某一帧看见、松手要被后面某一帧看见。JS 里同一拍里连发 `mousedown + mouseup + click` 什么都不会发生；空格也一样（跳跃读的是 `is_key_down`），但 F 用的是 `is_key_pressed`（边沿检测），同一拍也认。所以 `regress.py` 里点击都带 `hold=0.35`，按键都是 `keydown → sleep 0.7 → keyup`。
+- **视角灵敏度是 π/420 每像素**：拖 420 像素就是 180°，早顶到俯仰限位，等于垂直往下看自己脚底那一格。"右键放不下去"十有八九就是这个：那一格正被玩家自己占着，`place()` 里「别把自己砌进墙里」那条必然拒绝。而且垂直往下挖会把**自己脚下的方块挖掉、人掉进坑**，之后往哪放都贴脸。要测放方块就得抬着角度打远处：实测桌面在"比挖的时候抬 360 像素"的俯角上一放就成（改动 3→4）。
+- **判"有没有重画"要用中心 20×20 的绝对像素和差**，不能用那个比值：陡俯角挖的坑投不进中心 20×20，比值看着纹丝不动（我被这个骗过一整轮，白写了个"完全不重画"的结论）。空转 2 秒中心像素和漂移实测 0，所以判据写成"变化 > 4000"；一刀实测 +21566。
+- **跨会话比"是不是同一个世界"用全画面和的相对差**，容差 0.0040：挖 1 格实测差 0.0539，清档重开实测差 0.0000，两头都对上才算存档这条通了。昼夜一轮只有 360 秒，所以采样必须对齐（都用"开跑后再等 8 秒"，采样之前不许动视角）。
+- **`vis()` 得用 `getClientRects()` 并且往祖先看**：`getBoundingClientRect()` 在父层 `display:none` 时照样给矩形，我就被它骗过，把"整排按钮在被藏起来的 `#hud-btns` 里"读成了"按钮出来了"。
+- **无头 Firefox 报不出触屏能力**：`'ontouchstart' in window` 是 false、`navigator.maxTouchPoints` 是 0、`(any-pointer: coarse)` 也不成立；往 `window`、`window.wrappedJSObject`、`Window.prototype`、`Navigator.prototype` 上塞都塞不进页面的作用域（四种都试过）。所以"是触屏才显出跳/飞/换方块"这一步在自动化里只能验到：判据代码在（静态检查）、布局是对的（手动把那一排翻开：469×44，四个按钮各 52–66 × 44 px，够手指点）、桥是通的（点下去真的跳/换方块/切飞）。**显不显只能等真机。**
+- geckodriver 同一时刻只让开**一个**会话：每个场景收尾必须 `close()`，否则后面每个场景的 `POST /session` 直接 500（我一次跑了 5 个场景全"自己崩了"就是这个）。
+- 点「清档重开」是页面自己 `location.replace()`，钩子装得比 glue 的 `getContext` 晚，那一拍 `readPixels` 读回来全是 0。要验清档：先去 IndexedDB 里确认那条记录没了（`db_state()`），再用 `s.go()` 自己导航。
+- 存档里「时刻」那格别分两次读：wasm 推的值和页面 DOM 各读一次，中间游戏时钟又走了 1 分钟（1 游戏分 ≈ 0.25 秒真时间），就变成"两边不一致"。一次 execute 里把两个都拿回来就没这事。
+
+### 现在的实测数字（2026-11-18 晚，本机）
+
+- wasm 本体 527,523 字节，gzip 177,672 字节。开跑到 HUD 亮 7–10 秒。HUD 帧率 60–61；30 次采样的浸泡测试后段没有一个低于 30，全程零报错、零截断警告。
+- 自动化 **89 条断言：0 失败、3 条不作数**（不作数那三条就是无头报不出触屏能力）。七组：桌面基础 / 静态 / 无 WebGL / 看门狗 / 门面 / 手机触摸 / 浸泡。
+- Rust 单元测试 26 条全过（`cd game && cargo test`，本地目标就够，不用 wasm）。这轮新加 3 条：AO 每个面每个角的取样方向都得朝着它那一侧、`slot_delta` 两头都能绕回栏里、水可以穿过但不能被瞄准。
+- **回归脚本进仓库了：`game/regress.py`**（原来只躺在 `/tmp`，重启就没）。`python3 game/regress.py` 全跑，`python3 game/regress.py base touch` 只跑两组；测的是 `dist/`，所以要先 `bash game/build-wasm.sh && python3 build.py`。它 import 仓库根的 `wdshot.py`，geckodriver 用 `WDDRIVER=http://127.0.0.1:4455` 指过去。老的 `gamecheck.py` 留着（只做"能不能跑能不能挖"，一分钟出头，适合改完快速看一眼）。

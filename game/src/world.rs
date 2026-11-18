@@ -54,11 +54,21 @@ impl World {
         if data.len() != SX as usize * SY as usize * SZ as usize {
             return None;
         }
+        // 「改动」得跟着存档走：它的意思是"和种子初始相比被玩家动过多少格"，那就照同一颗种子
+        // 重建一份对比着数出来。以前这里写死 0，于是刷新之后画面里坑明明还在、HUD 却说
+        // 你一个方块都没动过（实测：挖一格 → 刷新 → 画面差 5.4%，改动显示 0）。
+        let base = World::new(seed);
+        let mut changed = 0u32;
+        for (i, &v) in data.iter().enumerate() {
+            if base.data.get(i) != Some(&v) {
+                changed += 1;
+            }
+        }
         Some(World {
             seed,
             data,
             dirty: vec![true; CHUNK_COUNT],
-            changed: 0,
+            changed,
         })
     }
 

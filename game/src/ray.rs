@@ -17,7 +17,7 @@ pub dist: f32,
 }
 
 /// 从 origin 沿 dir（必须是单位向量）往前走，最多 max_dist 格。
-/// 起点就埋在实心块里时返回 None，免得把方块塞进自己脚下。
+/// 起点那格不可通行（玩家埋在石头里）时沿 -dir 最多退 3 格另起炉灶，退不动才返回 None。
 pub fn cast(w: &World, origin: [f32; 3], dir: [f32; 3], max_dist: f32) -> Option<Hit> {
     let (dx, dy, dz) = (dir[0], dir[1], dir[2]);
 
@@ -40,6 +40,50 @@ pub fn cast(w: &World, origin: [f32; 3], dir: [f32; 3], max_dist: f32) -> Option
         }
     };
 
+    // 起点那格先单独看一眼，但别一撞上就整条射线作废：玩家飞进一格高的缝里时眼睛就埋在
+    // 石头里，那时十字线对什么都没目标、瞄准框也不画、挖和放全失灵（原来是直接 return None）。
+    // 沿 -dir 最多退 3 格，退到第一个可通行的格子再开始走 DDA；退不到才真的没目标。
+    // 退格只沿真有分量的轴退：dir 分量为 0 时上面那个 step 给的是 -1（DDA 里那根轴永远
+    // 轮不到走，所以没影响），照抄它退会把 y/z 一起挪走 —— 平着射进柱子成了往斜上方挪格，
+    // 柱子根本不在挪后的路上，照样没目标（这条错是被单元测试逮到的）。
+    let back = [
+        if dx > 0.0 {
+            -1
+        } else if dx < 0.0 {
+            1
+        } else {
+            0
+        },
+        if dy > 0.0 {
+            -1
+        } else if dy < 0.0 {
+            1
+        } else {
+            0
+        },
+        if dz > 0.0 {
+            -1
+        } else if dz < 0.0 {
+            1
+        } else {
+            0
+        },
+    ];
+    let mut backed = 0usize;
+    while !b::ray_passable(w.get(x, y, z)) && backed < 3 {
+        x += back[0];
+        y += back[1];
+        z += back[2];
+        backed += 1;
+    }
+    if !b::ray_passable(w.get(x, y, z)) {
+        return None;
+    }
+
+    // t_max 必须等退完格再算：它说的是「当前这一格的那个界面」，退回前一格界面就换了。
+    // 算出来可能是负数（原点已经越过那个界面），这不要紧：DDA 每步挑的都是最小的 t，
+    // 负的那几步先走，正好把刚退回来的那几格按顺序重新检查一遍 —— 命中的往往就是埋住
+    // 眼睛的那格，挖掉它就出来了。
     let mut t_max = [
         if dx > 0.0 {
             (x as f32 + 1.0 - origin[0]) / dx
@@ -64,11 +108,6 @@ pub fn cast(w: &World, origin: [f32; 3], dir: [f32; 3], max_dist: f32) -> Option
         },
     ];
     let t_delta = [guard(dx), guard(dy), guard(dz)];
-
-    // 起点那格先单独看一眼。
-    if b::is_solid(w.get(x, y, z)) {
-        return None;
-    }
 
     let mut t;
     let mut axis;
@@ -154,8 +193,22 @@ mod tests {
         // 平打空处什么都不该命中。
         assert!(cast(&w, [45.5, 25.5, 40.5], [-1.0, 0.0, 0.0], 20.0).is_none());
 
-        // 起点埋在实心里不给目标，免得把方块塞到自己脚底下。
+        // 起点埋在实心里、往后退 3 格也还在石头里（这里整块 0..=15 都是石头）才给 None。
         assert!(cast(&w, [40.5, 10.5, 40.5], [0.0, -1.0, 0.0], 20.0).is_none());
+    }
+
+    #[test]
+    fn 眼睛埋在石头里也要往后退格找目标() {
+        let mut w = flat_world();
+        for y in 16..21 {
+            w.set(50, y, 40, b::STONE);
+        }
+        // 起点就在柱子里（x=50 那格实心），柱子后面 x=51 是空气 → 退一格就有目标。
+        // 飞进一格高的缝里时十字线不能是空的，不然挖也挖不了、放也放不了。
+        let h = cast(&w, [50.5, 18.5, 40.5], [-1.0, 0.0, 0.0], 20.0).expect("埋在石头里也该有目标");
+        assert_eq!(h.cell, [50, 18, 40], "退一格再打，命中的就是埋住起点那格");
+        assert_eq!(h.normal, [1, 0, 0], "法线该指向退出来的那一侧");
+        assert!(h.dist < 0.0, "命中在起点之后（退回来的路上），距离本该是负的");
     }
 
     #[test]

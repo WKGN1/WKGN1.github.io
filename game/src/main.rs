@@ -4,8 +4,8 @@
 //! 「自发光」两个数，昼夜和雾在片元里算。这样 shading 全在网格生成时算完，
 //! 每帧的 GPU 活儿只剩一次采样 + 一次混合，手机才顶得住。
 //!
-//! 和 JS 的通信刻意做成最蠢的样子：Rust 通过 wasm 导入调 4 个 JS 函数，
-//! 参数只有 (指针, 长度)。好处是不用 wasm-bindgen，构建就一条 cargo 命令。
+//! 和 JS 的通信刻意做成最蠢的样子：Rust 通过 wasm 导入调 11 个 JS 函数，
+//! 参数只有整数（指针、长度、偏移）。好处是不用 wasm-bindgen，构建就一条 cargo 命令。
 
 mod blocks;
 mod mesh;
@@ -25,6 +25,17 @@ use world::World;
 /// 固定种子：文章截图、读者之间讨论同一座岛都对得上。
 const SEED: u32 = 20261117;
 
+/// 本地存档读不出来时写给玩家看的那句话（HUD 第 8 段）。
+/// `&'static str` 是因为它要从 Game 的字段里借出去拼 HUD。
+const BAD_SAVE_NOTE: &str = "本地存档读不出来，已按种子重建";
+
+/// 备注在 HUD 上挂多久。够看清一遍，又不会一直占着第 8 段挡掉飞行提示。
+const NOTE_SECONDS: f32 = 12.0;
+
+/// 等本地存档最多等这么久。JS 那边的 promise 不落地（隐私模式拒了 IndexedDB 之类）
+/// 就一直白屏的话，读者连「这彩蛋在干嘛」都看不到。
+const SAVE_WAIT_SECONDS: f32 = 4.0;
+
 /// 一整个昼夜循环的秒数。太长读者感受不到，太短会晕。
 const DAY_SECONDS: f32 = 360.0;
 
@@ -41,7 +52,7 @@ const MESH_BUDGET: usize = 12;
 // 和 JS 的桥（wasm 导入）
 // ---------------------------------------------------------------------------
 
-// 必须写明导入模块是 "env"：不写的话 lld 把这四个当成本模块内的未定义符号，
+// 必须写明导入模块是 "env"：不写的话 lld 把这些函数当成本模块内的未定义符号，
 // 链接直接失败；写了才变成 wasm 导入，交给浏览器的胶水脚本提供（miniquad 自己也是这么声明的）。
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "env")]
@@ -54,8 +65,17 @@ extern "C" {
     fn mcl_save_pending() -> u32;
     /// 0=读盘中 1=没有存档 2=有存档可读。
     fn mcl_save_ready() -> u32;
-    /// 把存档字节写进 wasm 内存，返回真实长度（0 表示没有）。
-    fn mcl_pull_save(ptr: *mut u8, cap: u32) -> u32;
+    /// 存档一共有多少字节（0 = 没有存档）。先问长度再分配，才不会被「截断」骗到。
+    fn mcl_save_len() -> u32;
+    /// 把存档字节写进 wasm 内存：从 offset 起最多拷 cap 字节，返回实际拷贝数（0 = 到底了/没有）。
+    /// 必须能分块轮询：只给 (ptr, cap) 时 JS 装不下就截到 cap 并返回 cap，Rust 以为读全了，
+    /// decode 报 WrongSize 把整份存档丢掉，HUD 还显示「已存档」。
+    fn mcl_pull_save(ptr: *mut u8, cap: u32, offset: u32) -> u32;
+    /// 手机端 DOM 按钮：这一帧被点过就返回非 0，取走即清（Rust 每帧各调一次）。
+    /// jump/fly 是「按了一下」，slot 是有符号增量（+1 下一个 / -1 上一个）。
+    fn mcl_take_jump() -> i32;
+    fn mcl_take_fly() -> i32;
+    fn mcl_take_slot() -> i32;
     /// 告诉页面「世界建好了」：门面该收，HUD 该亮。
     fn mcl_booted();
     /// 往页面和 console 里写一句话（启动阶段、panic 原因都走这里）。
@@ -167,23 +187,82 @@ mod bridge {
         }
     }
 
-    /// 拉存档字节。返回 Some(字节) / None（还没有或读不到）。
-    pub fn pull_save() -> Option<Vec<u8>> {
+    /// 拉存档字节。
+    /// `Ok(None)` = JS 那边确实没有存档；`Err(话)` = 有存档但拿不出来（太大 / 只给了一半），
+    /// 调用方要按种子重建并且**标记待存**，否则坏档永远躺在 IndexedDB 里反复崩。
+    pub fn pull_save() -> Result<Option<Vec<u8>>, &'static str> {
         #[cfg(target_arch = "wasm32")]
         {
-            // JS 需要一块落地区。存档实测几十 KB，256 KB 留足余量；
-            // wasm 内存只能长不能缩，所以别贪大。
+            // 落地区仍是一块 256 KB：wasm 内存只能长不能缩，所以窗口反复用同一块，
+            // 靠 offset 一段一段把整份存档搬进来（存档几十 KB，一般一轮就够）。
             const CAP: usize = 256 * 1024;
-            let mut buf: Vec<u8> = vec![0u8; CAP];
-            let n = unsafe { mcl_pull_save(buf.as_mut_ptr(), CAP as u32) } as usize;
-            if n == 0 || n > CAP {
-                return None;
+            // 超过这个长度不当存档处理：真有这么大的档，按尺寸算就已经不是我们的格式了。
+            const MAX_SAVE: usize = 8 * 1024 * 1024;
+
+            let total = unsafe { mcl_save_len() } as usize;
+            if total == 0 {
+                return Ok(None);
             }
-            buf.truncate(n);
-            Some(buf)
+            if total > MAX_SAVE {
+                return Err("本地存档太大，已按种子重建");
+            }
+
+            let mut buf: Vec<u8> = vec![0u8; total];
+            let mut off: u32 = 0;
+            while (off as usize) < total {
+                let want = CAP.min(total - off as usize) as u32;
+                let n =
+                    unsafe { mcl_pull_save(buf.as_mut_ptr().add(off as usize), want, off) } as usize;
+                if n == 0 {
+                    // JS 说没了，可我还没拿满：半截存档，宁可重来也别照着它建世界
+                    return Err("本地存档读不全，已按种子重建");
+                }
+                if n > want as usize {
+                    return Err("本地存档读不全，已按种子重建");
+                }
+                off += n as u32;
+            }
+            Ok(Some(buf))
         }
         #[cfg(not(target_arch = "wasm32"))]
-        std::fs::read("save.mcl").ok()
+        {
+            // 桌面调试用：文件在就是存档，不在就没有。
+            match std::fs::read("save.mcl") {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(_) => Ok(None),
+            }
+        }
+    }
+
+    /// 手机端按钮：这一帧有没有按过跳 / 切飞行 / 换方块。桌面版一律 0（键盘自己走）。
+    #[inline]
+    pub fn take_jump() -> i32 {
+        #[cfg(target_arch = "wasm32")]
+        {
+            unsafe { mcl_take_jump() }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        0
+    }
+
+    #[inline]
+    pub fn take_fly() -> i32 {
+        #[cfg(target_arch = "wasm32")]
+        {
+            unsafe { mcl_take_fly() }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        0
+    }
+
+    #[inline]
+    pub fn take_slot() -> i32 {
+        #[cfg(target_arch = "wasm32")]
+        {
+            unsafe { mcl_take_slot() }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        0
     }
 }
 
@@ -369,7 +448,6 @@ struct Game {
     selected: usize,
     time_of_day: f32,
     phase: Phase,
-    dirty_chunks: Vec<bool>,
     chunks: Vec<Option<Mesh>>,
     hud_timer: f32,
     save_timer: f32,
@@ -379,6 +457,15 @@ struct Game {
     look: Vec<LookTouch>,
     drag: (Vec2, f32, bool),
     wheel_cd: f32,
+    /// 已经跑过的游戏秒数（只在 Running 里累加）。双击判定拿它当钟：
+    /// 真实时钟会被切后台拉长，用被钳过的 dt 累加才不会把「上次抬手」记成几分钟前。
+    uptime: f32,
+    /// 上一次「没怎么动的轻点」的 (抬手时刻, 抬手位置)。连着两下 = 双击 → 切飞行。
+    double_tap: Option<(f32, Vec2)>,
+    /// HUD 第 8 段的备注（坏存档、等太久这类必须让玩家看见的话）。空 = 不显示。
+    note: &'static str,
+    /// 备注自动消失的剩余秒数。备注只占第 8 段，飞行提示一响就该让位，所以别长挂。
+    note_timer: f32,
     /// 程序化图集，建一次，交给每个区块网格带着。
     atlas: Option<Texture2D>,
 }
@@ -387,7 +474,6 @@ impl Game {
     fn new(world: World) -> Self {
         let spawn = world.spawn();
         Game {
-            dirty_chunks: vec![true; world::CHUNK_COUNT],
             world,
             player: Player::new(spawn),
             selected: 0,
@@ -403,53 +489,69 @@ impl Game {
             look: Vec::new(),
             drag: (vec2(0.0, 0.0), 0.0, false),
             wheel_cd: 0.0,
+            uptime: 0.0,
+            double_tap: None,
+            note: "",
+            note_timer: 0.0,
             atlas: None,
         }
     }
 
+    /// 在 HUD 第 8 段挂一句话，secs 秒后自己消失。
+    fn set_note(&mut self, text: &'static str, secs: f32) {
+        self.note = text;
+        self.note_timer = secs;
+    }
+
+    /// 消费世界那份脏表：一次取走、就地清零。
+    /// 脏标记只有 World 一份（挖/放时 set() 标脏），以前 Game 里另存一份没人读的，
+    /// 于是挖掉一格只改了数据和那份死表，网格永远不重建。
     fn rebuild_dirty_chunks(&mut self) {
+        // 取走而不是边读边清：build_chunk 只借 &self.world，而超预算的格子回头还要标回去。
+        let todo = std::mem::replace(&mut self.world.dirty, vec![false; world::CHUNK_COUNT]);
         let mut built = 0usize;
-        for cz in 0..world::CHUNKS_Z {
-            for cx in 0..world::CHUNKS_X {
-                let i = (cz * world::CHUNKS_X + cx) as usize;
-                if !self.dirty_chunks[i] {
-                    continue;
-                }
-                self.dirty_chunks[i] = false;
-                let mut m = ChunkMesh::default();
-                mesh::build_chunk(&self.world, cx, cz, &mut m);
-
-                let mut verts: Vec<Vertex> = Vec::with_capacity(m.vert_count());
-                for v in m.verts.chunks_exact(mesh::STRIDE_F32) {
-                    verts.push(Vertex {
-                        position: vec3(v[0], v[1], v[2]),
-                        uv: vec2(v[3], v[4]),
-                        // .r = 明暗，.g = 自发光标记
-                        color: [
-                            (v[5] * 255.0) as u8,
-                            if v[6] > 0.5 { 255 } else { 0 },
-                            0,
-                            255,
-                        ],
-                        normal: vec4(0.0, 0.0, 0.0, 0.0),
-                    });
-                }
-                self.chunks[i] = Some(Mesh {
-                    vertices: verts,
-                    indices: m.idx,
-                    texture: self.atlas.clone(),
-                });
-
-                built += 1;
-                if built >= MESH_BUDGET {
-                    return;
-                }
+        for i in 0..world::CHUNK_COUNT {
+            if !todo[i] {
+                continue;
             }
+            if built >= MESH_BUDGET {
+                // 这一帧建不完：剩下的标回世界上，下一帧接着建。漏标就等于永远缺一块网格。
+                self.world.dirty[i] = true;
+                continue;
+            }
+            let cx = i as i32 % world::CHUNKS_X;
+            let cz = i as i32 / world::CHUNKS_X;
+
+            let mut m = ChunkMesh::default();
+            mesh::build_chunk(&self.world, cx, cz, &mut m);
+
+            let mut verts: Vec<Vertex> = Vec::with_capacity(m.vert_count());
+            for v in m.verts.chunks_exact(mesh::STRIDE_F32) {
+                verts.push(Vertex {
+                    position: vec3(v[0], v[1], v[2]),
+                    uv: vec2(v[3], v[4]),
+                    // .r = 明暗，.g = 自发光标记
+                    color: [
+                        (v[5] * 255.0) as u8,
+                        if v[6] > 0.5 { 255 } else { 0 },
+                        0,
+                        255,
+                    ],
+                    normal: vec4(0.0, 0.0, 0.0, 0.0),
+                });
+            }
+            self.chunks[i] = Some(Mesh {
+                vertices: verts,
+                indices: m.idx,
+                texture: self.atlas.clone(),
+            });
+
+            built += 1;
         }
     }
 
     fn mark_all_dirty(&mut self) {
-        for d in self.dirty_chunks.iter_mut() {
+        for d in self.world.dirty.iter_mut() {
             *d = true;
         }
     }
@@ -537,8 +639,22 @@ impl Game {
         } else {
             "--".to_string()
         };
+        // 第 8 段是「玩家此刻该知道的一句话」：飞行提示优先（它只在飞行那几秒有用），
+        // 其次是在等存档时说明画面为什么还空着，其它时候留给备注（坏存档、读档超时）。
+        let note = if self.player.fly {
+            "飞行中，空格上升 Shift 下降"
+        } else if matches!(self.phase, Phase::Waiting) {
+            "正在读本地存档…"
+        } else {
+            self.note
+        };
+        // 第 9 段是位置读数，界面上只映射前 8 段所以不会显示，留给外部自动化测试用。
+        let pos = format!(
+            "x{:.2} y{:.2} z{:.2}",
+            self.player.pos[0], self.player.pos[1], self.player.pos[2]
+        );
         let text = format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.selected + 1,
             b::block_name(b::HOTBAR[self.selected]),
             mode,
@@ -546,7 +662,8 @@ impl Game {
             self.world.changed,
             fps,
             state,
-            if self.player.fly { "飞行中，空格上升 Shift 下降" } else { "" }
+            note,
+            pos
         );
         bridge::hud(&text);
     }
@@ -558,6 +675,13 @@ impl Game {
 
 /// 桌面：按住拖动转向；不移动就松手算点击。
 fn read_mouse(g: &mut Game, dt: f32) {
+    // 触屏这一帧有手指就别走鼠标路径：胶水的 simulate_mouse_with_touch 默认把触摸同时点一份
+    // 鼠标事件，main 开头已经关了；这里再兜一道，免得哪台设备没关掉时一次轻点被
+    // read_touch 和这里各挖一次（一下变两下）、按住放完又挖。
+    if !touches().is_empty() {
+        return;
+    }
+
     let (mx, my) = mouse_position();
     let cur = vec2(mx, my);
 
@@ -619,6 +743,7 @@ fn read_mouse(g: &mut Game, dt: f32) {
 }
 
 /// 右半屏的一根手指。held 是按住秒数，moved 是累计位移（像素）。
+/// dragging：位移已经越过「还在拖」的门槛，这次按放置永久取消（见下面的 aged 循环）。
 #[derive(Clone, Copy)]
 struct LookTouch {
     id: u64,
@@ -626,10 +751,12 @@ struct LookTouch {
     held: f32,
     moved: f32,
     placed: bool,
+    dragging: bool,
 }
 
 /// 触屏：左半屏摇杆走路，右半屏拖动转向，轻点挖、按住放。
-/// 返回摇杆给出的移动意图（已经按屏幕方向算好，不需要键盘的朝向旋转）。
+/// 每半屏只认一根手指：多指同时按着时第二根只是重复记账，会把视角转成两倍快。
+/// 返回摇杆给出的移动意图（已按当前朝向转过，和键盘的 wish_from_keys 同一套基）。
 fn read_touch(g: &mut Game, dt: f32) -> Option<[f32; 3]> {
     let w = screen_width();
 
@@ -641,14 +768,16 @@ fn read_touch(g: &mut Game, dt: f32) -> Option<[f32; 3]> {
                     if g.touch_move.is_none() {
                         g.touch_move = Some((t.id, t.position, t.position));
                     }
-                } else {
-                    g.look.retain(|l| l.id != t.id);
+                } else if g.look.is_empty() {
+                    // 只收第一根。后面几根手指是玩家手滑或多指按住，
+                    // 再 push 一份就会各算各的位移，视角转两倍快。
                     g.look.push(LookTouch {
                         id: t.id,
                         last: t.position,
                         held: 0.0,
                         moved: 0.0,
                         placed: false,
+                        dragging: false,
                     });
                 }
             }
@@ -664,6 +793,11 @@ fn read_touch(g: &mut Game, dt: f32) -> Option<[f32; 3]> {
                     let d = t.position - l.last;
                     l.moved += d.length();
                     l.last = t.position;
+                    // 只要真在拖，就把这次的放置取消掉。以前的判据是「0.45 秒时累计位移 < 24」，
+                    // 于是慢慢拖（每帧两三个像素）一路都能熬到超时，视角也转了、方块也放出去了。
+                    if l.moved > 12.0 {
+                        l.dragging = true;
+                    }
                     let sens = std::f32::consts::PI / 420.0;
                     g.player.yaw += d.x * sens;
                     g.player.pitch -= d.y * sens;
@@ -685,7 +819,20 @@ fn read_touch(g: &mut Game, dt: f32) -> Option<[f32; 3]> {
                     g.look.retain(|l| l.id != t.id);
                     if let Some(l) = hit {
                         if !l.placed && l.held < 0.45 && l.moved < 14.0 {
-                            g.mine();
+                            // 双击切飞行：手机上没有 F 键，光靠 DOM 按钮还不够顺手。
+                            // 两下都算「没怎么动的轻点」、位置挨着、间隔不到 0.35 秒 → 当成双击。
+                            // 第二下不再挖，不然双击变成「挖两下 + 切飞行」。
+                            let near_prev = g.double_tap.map_or(false, |(t0, p0)| {
+                                g.uptime - t0 < 0.35 && (t.position - p0).length() < 60.0
+                            });
+                            if near_prev {
+                                g.double_tap = None;
+                                g.player.fly = !g.player.fly;
+                                g.player.vel[1] = 0.0; // 切换瞬间别带着旧竖直速度乱窜
+                            } else {
+                                g.double_tap = Some((g.uptime, t.position));
+                                g.mine();
+                            }
                         }
                     }
                 }
@@ -698,7 +845,7 @@ fn read_touch(g: &mut Game, dt: f32) -> Option<[f32; 3]> {
     let mut aged = 0usize;
     for l in g.look.iter_mut() {
         l.held += dt;
-        if l.held > 0.45 && l.moved < 24.0 && !l.placed {
+        if l.held > 0.45 && l.moved < 24.0 && !l.placed && !l.dragging {
             l.placed = true;
             aged += 1;
         }
@@ -713,7 +860,16 @@ fn read_touch(g: &mut Game, dt: f32) -> Option<[f32; 3]> {
         if d.length() >= 8.0 {
             let len = d.length();
             let k = len.min(52.0) / 52.0 / len;
-            return Some([d.x * k, 0.0, d.y * k]);
+            // 摇杆量出来的是「屏幕方向」，得按当前朝向换成世界方向，和键盘那套基一模一样：
+            // 屏幕向上 = 往前，屏幕向右 = 往右（yaw=0 时前向是 +Z，见 phys::look_dir）。
+            // 原来直接写 [d.x, 0, d.y]：既没转朝向，又因为屏幕 y 向下为正，
+            // 往上推摇杆被当成往后退，玩家想前进却朝前退。
+            let (sy, cy) = (g.player.yaw.sin(), g.player.yaw.cos());
+            let fwd = [sy, cy]; // 前向的水平分量 (x, z)
+            let right = [cy, -sy]; // 右手方向 (x, z)
+            let f = -d.y * k; // 往上推 d.y 为负，取反才是「前进为正」
+            let r = d.x * k;
+            return Some([fwd[0] * f + right[0] * r, 0.0, fwd[1] * f + right[1] * r]);
         }
     }
     None
@@ -760,14 +916,30 @@ fn wish_from_keys(p: &Player) -> [f32; 3] {
 // 入口
 // ---------------------------------------------------------------------------
 
-/// 把 JS 递过来的存档灌进世界。读不懂就当坏档：按种子重来，并标记待存覆盖掉它。
+/// 把 JS 递过来的存档灌进世界。读不懂 / 太大 / 只给了一半，一律当坏档：按种子重来。
+/// 每一条失败分支都必须 `save_dirty = true`：不然那份坏档永远躺在 IndexedDB 里，
+/// 读者刷新一次就崩一次（panic=abort，主循环连一帧都不续）。
 fn apply_loaded_save(game: &mut Game) {
-    let Some(bytes) = bridge::pull_save() else {
-        return;
+    let bytes = match bridge::pull_save() {
+        // JS 那边确实没有存档：按种子开跑就行，不该顺手覆盖人家的档
+        Ok(None) => return,
+        Err(why) => {
+            game.world = World::new(SEED);
+            game.player = Player::new(game.world.spawn());
+            game.save_dirty = true;
+            game.set_note(why, NOTE_SECONDS);
+            return;
+        }
+        Ok(Some(bytes)) => bytes,
     };
     match save::decode(&bytes) {
         Ok((seed, raw)) => {
             let Some(w) = World::from_raw(seed, raw) else {
+                // 长度对不上等：世界建不起来，和坏档一样得按种子重来并覆盖掉它
+                game.world = World::new(SEED);
+                game.player = Player::new(game.world.spawn());
+                game.save_dirty = true;
+                game.set_note(BAD_SAVE_NOTE, NOTE_SECONDS);
                 return;
             };
             game.world = w;
@@ -778,6 +950,7 @@ fn apply_loaded_save(game: &mut Game) {
             game.world = World::new(SEED);
             game.player = Player::new(game.world.spawn());
             game.save_dirty = true;
+            game.set_note(BAD_SAVE_NOTE, NOTE_SECONDS);
         }
     }
 }
@@ -785,6 +958,18 @@ fn apply_loaded_save(game: &mut Game) {
 #[macroquad::main("方块彩蛋 · Rust + wasm")]
 async fn main() {
     bridge::install_panic_hook();
+
+    // 触摸默认还会顺带点一份鼠标事件（一次轻点挖两下的根源）。这里鼠标和触屏各写各的，
+    // 所以关掉；read_mouse 里还兜了一道「这一帧有手指就不走鼠标」。
+    simulate_mouse_with_touch(false);
+
+    // macroquad 每个 draw call 的容量默认 10000 顶点 / 5000 索引，而一个区块的网格最多
+    // 5272 顶点 / 7908 索引：超出的部分被 clamp 掉，只 warn 一句「exceeded max drawcall size」
+    // （实测每帧 31 条），丢掉的是每个区块 +Z 那头最后几行的面 —— 画面上每隔 16 格
+    // 就有一条横着能看穿天空的缺面。索引是 u16，单个网格顶点上限 65536，这里离它还远。
+    // 必须在窗口/GL 起来之后调（它要重建 GPU 缓冲），所以放在建材质之前第一件事。
+    macroquad::window::gl_set_drawcall_buffer_capacity(16000, 12000);
+
     bridge::log("rust 起来了，开始建材质");
     let atlas = make_atlas();
     bridge::log("纹理图集好了");
@@ -795,8 +980,12 @@ async fn main() {
 
     let mut game = Game::new(World::new(SEED));
     game.atlas = Some(atlas);
-    let mut fps_smooth = 0.0f32;
+    // 帧率从 60 起步而不是从 0：0 起步做一次 0.08 混合，首帧 dt 只有几毫秒，
+    // 1/dt 就是几百，HUD 上会先闪一个 800 之类的离谱数字再慢慢掉回真值。
+    let mut fps_smooth = 60.0f32;
     let mut fps_report = 0.0f32;
+    // 等存档的余量，每帧减 dt；花完就当「没有存档」直接开跑（见下面 1) 那段）。
+    let mut wait_left = SAVE_WAIT_SECONDS;
 
     loop {
         let dt = get_frame_time().min(0.1);
@@ -807,14 +996,32 @@ async fn main() {
             fps_report = 0.5;
         }
 
+        // 备注是自己会消失的话，别让它永远赖在第 8 段上
+        if game.note_timer > 0.0 {
+            game.note_timer -= dt;
+            if game.note_timer <= 0.0 {
+                game.note = "";
+            }
+        }
+
         // 1) 等存档。IndexedDB 读盘是异步的，读好之前不动物理、不建网格，
         //     免得先按种子建一遍、拿到存档再建一遍。
         if matches!(game.phase, Phase::Waiting) {
             match bridge::save_ready() {
                 0 => {
-                    game.push_hud();
-                    next_frame().await;
-                    continue;
+                    wait_left -= dt;
+                    if wait_left > 0.0 {
+                        // 等存档期间每帧推一次 HUD：第 8 段就是「正在读本地存档…」，
+                        // 这句说明只有这一处来源（以前底下还写死一句 HUD，那是死代码）。
+                        game.push_hud();
+                        next_frame().await;
+                        continue;
+                    }
+                    bridge::log("等本地存档等太久，先按种子开跑");
+                    game.set_note("读存档等太久，先按种子开了", NOTE_SECONDS);
+                    game.mark_all_dirty();
+                    game.phase = Phase::Running;
+                    bridge::booted();
                 }
                 st => {
                     if st == 2 {
@@ -829,6 +1036,15 @@ async fn main() {
 
         // 2) 输入
         if matches!(game.phase, Phase::Running) {
+            // 双击判定要一个「游戏内的钟」，切后台那段不计入
+            game.uptime += dt;
+
+            // 手机端按钮是「取走即清」的，所以每帧都得各问一次、而且不能写在 || 的右边：
+            // 短路跳过一次，JS 那个标志就留到下一帧再触发一遍（切飞机会连切两次）。
+            let btn_jump = bridge::take_jump() != 0;
+            let btn_fly = bridge::take_fly() != 0;
+            let btn_slot = bridge::take_slot();
+
             read_mouse(&mut game, dt);
             let mut wish = wish_from_keys(&game.player);
             if let Some(w) = read_touch(&mut game, dt) {
@@ -851,12 +1067,19 @@ async fn main() {
                 }
             }
 
-            if is_key_pressed(KeyCode::F) {
+            // slot 是有符号增量（+1 下一个 / -1 上一个）：rem_euclid 让两头都能绕回栏里。
+            if btn_slot != 0 {
+                let n = b::HOTBAR.len() as i32;
+                game.selected = (game.selected as i32 + btn_slot).rem_euclid(n) as usize;
+            }
+
+            if is_key_pressed(KeyCode::F) || btn_fly {
                 game.player.fly = !game.player.fly;
                 game.player.vel[1] = 0.0;
             }
 
-            let jump = is_key_down(KeyCode::Space);
+            // 手机端没有键盘，跳全靠那排 DOM 按钮（触屏双击也能切飞行，见 read_touch）
+            let jump = is_key_down(KeyCode::Space) || btn_jump;
             let down_key = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
             // 行走时 Shift 是加速，飞行时 Shift 是下降，两者不能同时生效。
             let sprint = down_key && !game.player.fly;
@@ -876,9 +1099,10 @@ async fn main() {
                 game.hud_timer = 0.2;
                 game.push_hud();
             }
-        } else {
-            bridge::hud("1|草方块|等待|06:00|0|--|读取存档|正在读本地 IndexedDB");
         }
+        // 这里原来挂着一个 else 分支，写死一句「正在读本地 IndexedDB」的 HUD：
+        // 能走到这儿 phase 早就是 Running 了（Waiting 那条要么 continue 掉、要么刚切成 Running），
+        // 那句永远不执行。这类说明话统一走 push_hud 的第 8 段，别再单独拼一份。
 
         // 4) 网格
         if matches!(game.phase, Phase::Running) {

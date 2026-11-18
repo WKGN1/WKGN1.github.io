@@ -234,7 +234,8 @@ fn paint_tile(tile: u8, x: u32, y: u32) -> [u8; 3] {
     }
 }
 
-/// 生成 RGBA 图集。注意水用的是通用贴片，颜色靠 mesh 里的 tint 压暗。
+/// 生成 RGBA 图集。水用的是它自己的 11 号贴片（TILE_WATER，波纹直接画在像素里），
+/// mesh 里没有为水单开的 tint 分支：水的明暗和其它方块一样只走「朝向明暗 × AO」。
 pub fn atlas_rgba() -> Vec<u8> {
     let mut out = vec![255u8; (ATLAS_W * ATLAS_H * 4) as usize];
     for tile in 0..TILE_COUNT {
