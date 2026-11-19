@@ -502,6 +502,20 @@ function registerBridge() {
         wantSlot = 0;
         return v;
       };
+      // 桌面自由转向的三条：攒下来的鼠标位移（像素，取走即清）+ 「这一帧视角归页面推」
+      env.mcl_take_look_x = function () {
+        var v = lookDx;
+        lookDx = 0;
+        return v;
+      };
+      env.mcl_take_look_y = function () {
+        var v = lookDy;
+        lookDy = 0;
+        return v;
+      };
+      env.mcl_free_look = function () {
+        return lookFree ? 1 : 0;
+      };
     },
 
     on_init: function () {}
@@ -836,6 +850,66 @@ function forwardOutsideUp(ev) {
   try { c.dispatchEvent(mk); } catch (e) {}
 }
 
+// ---------------------------------------------------------------------------
+// 桌面转向：鼠标一动就转。这是用户明确要求的（「在电脑上运行就用鼠标移动控制视角」），
+// 原来是「按住拖动才转」，鼠标光动着什么都不发生。
+//
+// 光标能走的距离有限（撞到画布边就没得动了），所以能指针锁定就锁：锁上之后浏览器直接给
+// movementX/movementY，转多少圈都不受限。引擎不认指针锁定（老 Safari、一些微信内核）就退回
+// 按 clientX/clientY 差分，那种情况下光标离开画布就不再转 —— 他离开画布多半是去点顶上那排
+// 存档按钮，不该顺手把视角带走。
+// 按着鼠标的时候不推视角：那一下是要挖/放，手难免抖，不然每挖一对方位就跟着抖一下。
+var LOOK_SENS_PER_PX = Math.PI / 700; // 和以前按住拖动同一档：整屏 180° 约 700 像素
+var lookDx = 0, lookDy = 0, lookFree = false, lookLocked = false;
+var lookLastX = 0, lookLastY = 0, lookHaveLast = false;
+
+function isTouchish() {
+  if ('ontouchstart' in window) return true;
+  if ((navigator.maxTouchPoints || 0) > 0) return true;
+  return !!(window.matchMedia && window.matchMedia('(any-pointer: coarse)').matches);
+}
+
+function canvasHasCursor(ev) {
+  var c = $('glcanvas');
+  if (!c || typeof ev.clientX !== 'number') return false;
+  var r = c.getBoundingClientRect();
+  return ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom;
+}
+
+// 攒位移给 Rust 每帧取：攒多了就是转得快一点，不会丢动作。
+function pushLook(ev) {
+  if (!lookFree || !window.__MCL_BOOTED || !ev) return;
+  if (ev.buttons !== 0) { lookHaveLast = false; return; }     // 按着的时候不转向
+  var dx = 0, dy = 0;
+  if (lookLocked && typeof ev.movementX === 'number' && (ev.movementX !== 0 || ev.movementY !== 0)) {
+    dx = ev.movementX;
+    dy = ev.movementY;
+  } else {
+    if (!lookLocked && !canvasHasCursor(ev)) { lookHaveLast = false; return; }
+    if (!lookHaveLast) {
+      lookLastX = ev.clientX; lookLastY = ev.clientY; lookHaveLast = true;
+      return;
+    }
+    dx = ev.clientX - lookLastX;
+    dy = ev.clientY - lookLastY;
+    lookLastX = ev.clientX;
+    lookLastY = ev.clientY;
+  }
+  if (!dx && !dy) return;
+  lookDx += dx;
+  lookDy += dy;
+  if (lookDx > 4000) lookDx = 4000;   // 极端情况下别把一帧的转向撑到离谱
+  if (lookDx < -4000) lookDx = -4000;
+  if (lookDy > 4000) lookDy = 4000;
+  if (lookDy < -4000) lookDy = -4000;
+}
+
+function requestLookLock() {
+  var c = $('glcanvas');
+  if (!c || !c.requestPointerLock) return;
+  try { c.requestPointerLock(); } catch (e) {}
+}
+
 function watchBoot() {
   var timer = setInterval(function () {
     if (!window.__MCL_BOOTED) return;
@@ -867,8 +941,8 @@ function watchBoot() {
     // 触屏设备换一套操作提示，并把 HUD 上的跳/飞/换方块按钮显出来
     // 触屏判据别只盯 ontouchstart：带触屏的笔记本、平板、一些国产 WebView 要么压根没这个属性、
     // 要么它有但不能用。(any-pointer: coarse) 更实在 —— 真能用手指头点的设备才叫 coarse。
-    var touchish = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0) ||
-      (window.matchMedia && window.matchMedia('(any-pointer: coarse)').matches);
+    var touchish = isTouchish();
+    lookFree = !touchish;   // 桌面才走「移动鼠标就转向」；触屏走右半屏拖动
     var hd = $('hint-desktop');
     var ht = $('hint-touch');
     if (touchish) {
@@ -1024,6 +1098,25 @@ function wireButtons() {
   if (c && c.addEventListener) {
     c.addEventListener('pointerdown', focusCanvas, false);
     c.addEventListener('mousedown', focusCanvas, false);
+  }
+
+  // 桌面自由转向：鼠标一动就转（见 pushLook）。只挂 mousemove 就够，
+  // 再挂 pointermove 会和它各算一遍、转向翻倍；触屏那边 lookFree 本来就是 false。
+  if (window.addEventListener) {
+    try {
+      document.addEventListener('mousemove', pushLook, false);
+      document.addEventListener('pointerlockchange', function () {
+        lookLocked = (document.pointerLockElement === $('glcanvas'));
+        lookHaveLast = false;
+      }, false);
+      document.addEventListener('pointerlockerror', function () { lookLocked = false; }, false);
+      var gl0 = $('glcanvas');
+      if (gl0 && gl0.addEventListener) {
+        gl0.addEventListener('mousedown', function (ev) {
+          if (lookFree && !lookLocked && ev.button === 0) requestLookLock();
+        }, false);
+      }
+    } catch (e) {}
   }
 
   // 捕获相监听：画布外的松手转交给画布（见 forwardOutsideUp）

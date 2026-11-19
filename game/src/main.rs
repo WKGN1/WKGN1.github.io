@@ -73,6 +73,12 @@ extern "C" {
     fn mcl_pull_save(ptr: *mut u8, cap: u32, offset: u32) -> u32;
     /// 手机端 DOM 按钮：这一帧被点过就返回非 0，取走即清（Rust 每帧各调一次）。
     /// jump/fly 是「按了一下」，slot 是有符号增量（+1 下一个 / -1 上一个）。
+    /// 桌面「移动鼠标就转向」：页面累积好的鼠标位移（像素），取走即清。
+    fn mcl_take_look_x() -> f32;
+    fn mcl_take_look_y() -> f32;
+    /// 1 = 这一帧视角由页面推（自由转向）：Rust 别再按拖拽转一遍，
+    /// 也别再拿"拖了多远"判点击 —— 自由转向下鼠标本来就一直在飘。
+    fn mcl_free_look() -> i32;
     fn mcl_take_jump() -> i32;
     fn mcl_take_fly() -> i32;
     fn mcl_take_slot() -> i32;
@@ -129,6 +135,41 @@ mod bridge {
         #[cfg(not(target_arch = "wasm32"))]
         {
             eprintln!("{}", text);
+        }
+    }
+
+    /// 桌面自由转向：页面攒好的鼠标位移（像素），取走即清。
+    pub fn take_look_x() -> f32 {
+        #[cfg(target_arch = "wasm32")]
+        {
+            unsafe { mcl_take_look_x() }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            0.0
+        }
+    }
+
+    pub fn take_look_y() -> f32 {
+        #[cfg(target_arch = "wasm32")]
+        {
+            unsafe { mcl_take_look_y() }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            0.0
+        }
+    }
+
+    /// 页面说「这一帧视角归我推」。桌面调试版永远是自己算，所以 false。
+    pub fn free_look() -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            unsafe { mcl_free_look() != 0 }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            false
         }
     }
 
@@ -648,10 +689,15 @@ impl Game {
         } else {
             self.note
         };
-        // 第 9 段是位置读数，界面上只映射前 8 段所以不会显示，留给外部自动化测试用。
+        // 第 9 段是位姿读数（位置 + 朝向），界面上只映射前 8 段所以不会显示，
+        // 留给外部自动化测试用：有了 yaw/pitch 才能验「往右拖是不是真往右转」这种方向问题。
         let pos = format!(
-            "x{:.2} y{:.2} z{:.2}",
-            self.player.pos[0], self.player.pos[1], self.player.pos[2]
+            "x{:.2} y{:.2} z{:.2} yaw{:.3} pitch{:.3}",
+            self.player.pos[0],
+            self.player.pos[1],
+            self.player.pos[2],
+            self.player.yaw,
+            self.player.pitch
         );
         let text = format!(
             "{}|{}|{}|{}|{}|{}|{}|{}|{}",
@@ -673,7 +719,11 @@ impl Game {
 // 输入
 // ---------------------------------------------------------------------------
 
-/// 桌面：按住拖动转向；不移动就松手算点击。
+/// 整屏转 180° 大约需要的鼠标像素（按住拖动和自由转向共用这一档）。
+const MOUSE_SENS: f32 = std::f32::consts::PI / 700.0;
+
+/// 桌面：页面上鼠标一移动就转向（free_look 时位移由 loader.js 攒着递进来）；
+/// 页面不推的时候退回按住拖动转向。按下再松手算一次点击。
 fn read_mouse(g: &mut Game, dt: f32) {
     // 触屏这一帧有手指就别走鼠标路径：胶水的 simulate_mouse_with_touch 默认把触摸同时点一份
     // 鼠标事件，main 开头已经关了；这里再兜一道，免得哪台设备没关掉时一次轻点被
@@ -688,6 +738,15 @@ fn read_mouse(g: &mut Game, dt: f32) {
     let held = is_mouse_button_down(MouseButton::Left)
         || is_mouse_button_down(MouseButton::Right)
         || is_mouse_button_down(MouseButton::Middle);
+    let free = bridge::free_look();
+
+    // 自由转向：位移是页面攒好递过来的，符号（往右拖 = yaw 减）在 phys::turn_yaw_pitch 里
+    if free {
+        let (lx, ly) = (bridge::take_look_x(), bridge::take_look_y());
+        if lx != 0.0 || ly != 0.0 {
+            phys::turn_yaw_pitch(&mut g.player.yaw, &mut g.player.pitch, lx, ly, MOUSE_SENS);
+        }
+    }
 
     if held {
         if !g.drag.2 {
@@ -697,18 +756,16 @@ fn read_mouse(g: &mut Game, dt: f32) {
             let d = cur - g.drag.0;
             g.drag.1 += d.length();
             g.drag.0 = cur;
-            if g.drag.1 > 6.0 {
+            // 页面在推视角了就别再按拖拽转一遍，否则一次移动算两回
+            if !free && g.drag.1 > 6.0 {
                 g.drag.2 = true;
-                // 拖动即转向：整屏转 180° 大约需要 700 像素
-                let sens = std::f32::consts::PI / 700.0;
-                g.player.yaw += d.x * sens;
-                g.player.pitch -= d.y * sens;
-                clamp_pitch(&mut g.player);
+                phys::turn_yaw_pitch(&mut g.player.yaw, &mut g.player.pitch, d.x, d.y, MOUSE_SENS);
             }
         }
     } else if g.drag.2 {
-        // 松手：没怎么移动过的话当成一次点击
-        let tapped = g.drag.1 <= 6.0;
+        // 松手：没怎么移动过的话当成一次点击。自由转向下鼠标一直在飘，"拖了多远"不再是依据 ——
+        // 按下再松手就算一下（loader.js 那边按着鼠标时不推视角，手抖不会把视角带歪）。
+        let tapped = free || g.drag.1 <= 6.0;
         g.drag = (cur, 0.0, false);
         if tapped {
             if is_mouse_button_released(MouseButton::Right) {
@@ -798,10 +855,9 @@ fn read_touch(g: &mut Game, dt: f32) -> Option<[f32; 3]> {
                     if l.moved > 12.0 {
                         l.dragging = true;
                     }
+                    // 手指往哪儿拖，视角就往哪儿转：和桌面同一套符号（phys::turn_yaw_pitch）。
                     let sens = std::f32::consts::PI / 420.0;
-                    g.player.yaw += d.x * sens;
-                    g.player.pitch -= d.y * sens;
-                    clamp_pitch(&mut g.player);
+                    phys::turn_yaw_pitch(&mut g.player.yaw, &mut g.player.pitch, d.x, d.y, sens);
                 }
             }
             // 手指按着没动：保持现状就行，摇杆和视角都不需要更新
@@ -864,21 +920,14 @@ fn read_touch(g: &mut Game, dt: f32) -> Option<[f32; 3]> {
             // 屏幕向上 = 往前，屏幕向右 = 往右（yaw=0 时前向是 +Z，见 phys::look_dir）。
             // 原来直接写 [d.x, 0, d.y]：既没转朝向，又因为屏幕 y 向下为正，
             // 往上推摇杆被当成往后退，玩家想前进却朝前退。
-            let (sy, cy) = (g.player.yaw.sin(), g.player.yaw.cos());
-            let fwd = [sy, cy]; // 前向的水平分量 (x, z)
-            let right = [cy, -sy]; // 右手方向 (x, z)
+            let fwd = phys::look_dir_of(g.player.yaw, 0.0); // 前向（水平）
+            let right = phys::right_dir_of(g.player.yaw); // 屏幕右边对应的世界方向
             let f = -d.y * k; // 往上推 d.y 为负，取反才是「前进为正」
             let r = d.x * k;
-            return Some([fwd[0] * f + right[0] * r, 0.0, fwd[1] * f + right[1] * r]);
+            return Some([fwd[0] * f + right[0] * r, 0.0, fwd[2] * f + right[2] * r]);
         }
     }
     None
-}
-
-#[inline]
-fn clamp_pitch(p: &mut Player) {
-    let lim = std::f32::consts::FRAC_PI_2 - 0.02;
-    p.pitch = p.pitch.clamp(-lim, lim);
 }
 
 /// 把 WASD 的按键意图按当前朝向转成世界坐标方向。
@@ -900,9 +949,8 @@ fn wish_from_keys(p: &Player) -> [f32; 3] {
     if f == 0.0 && r == 0.0 {
         return [0.0, 0.0, 0.0];
     }
-    let (sy, cy) = (p.yaw.sin(), p.yaw.cos());
-    let fwd = [sy, 0.0, cy];
-    let right = [cy, 0.0, -sy];
+    let fwd = phys::look_dir_of(p.yaw, 0.0); // 前向（水平）
+    let right = phys::right_dir_of(p.yaw); // 屏幕右边 —— 符号有单元测试钉着
     let mut d = [fwd[0] * f + right[0] * r, 0.0, fwd[2] * f + right[2] * r];
     let len = (d[0] * d[0] + d[2] * d[2]).sqrt();
     if len > 1.0 {

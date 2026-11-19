@@ -2,10 +2,8 @@
 # -*- coding: utf-8 -*-
 """方块彩蛋回归测试：把两个审查清单一一验掉。
 
-用法：python3 game/regress.py              # 七组全跑（约 20 分钟）
-      python3 game/regress.py base touch    # 只跑指定几组
-      WDDRIVER=http://127.0.0.1:4455 python3 game/regress.py   # 指定 geckodriver（别跟别的会话抢 4444）
-可选场景：base static nowebgl watchdog gate touch soak
+用法：python3 /tmp/gqa.py            # 全跑
+      python3 /tmp/gqa.py base touch # 只跑指定场景
 
 只测 dist/（构建产物），所以要先 `bash game/build-wasm.sh && python3 build.py`。
 信号都来自页面自己暴露的东西：__MCL_BOOTED / __MCL_HUD（9 段，第 9 段是我要求加的
@@ -18,6 +16,7 @@
 import base64
 import functools
 import json
+import math
 import os
 import re
 import shutil
@@ -27,7 +26,7 @@ import time
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-BLOG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # 仓库根（这脚本在 blog/game/ 里）
+BLOG = "/run/media/suyzz/e2270998-5ad9-4aef-860c-ba06f27ea0a9/strata/dsh/dsh_wechat/blog"
 DIST = os.path.join(BLOG, "dist")
 DRIVER = os.environ.get("WDDRIVER", "http://127.0.0.1:4444")
 sys.path.insert(0, BLOG)
@@ -171,6 +170,11 @@ window.__T = {
     var m = p.match(/x(-?\d+\.?\d*) y(-?\d+\.?\d*) z(-?\d+\.?\d*)/);
     return m ? [parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3])] : null;
   },
+  pose: function(){
+    var p = String((window.__MCL_HUD || '').split('|')[8] || '');
+    var m = p.match(/x(-?[0-9.]+) y(-?[0-9.]+) z(-?[0-9.]+) yaw(-?[0-9.]+) pitch(-?[0-9.]+)/);
+    return m ? [parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3]), parseFloat(m[4]), parseFloat(m[5])] : null;
+  },
   size: function(){ return [window.innerWidth, window.innerHeight]; },
   // 合成鼠标事件：macroquad 的输入挂在 canvas 上，所以直接派发到 canvas。
   // 同时补一份 pointer*：有些胶水只听 pointer，只听 mouse 也会漏。
@@ -179,7 +183,7 @@ window.__T = {
     var mk = function(kind){
       var cls = kind === 'pointer' ? window.PointerEvent : window.MouseEvent;
       if (!cls) return;
-      var opt = {bubbles: true, cancelable: true, clientX: x, clientY: y, button: btn || 0, view: window};
+      var opt = {bubbles: true, cancelable: true, clientX: x, clientY: y, button: btn || 0, buttons: btn || 0, view: window};
       if (kind === 'pointer') { opt.pointerId = 1; opt.pointerType = 'mouse'; opt.isPrimary = true; opt.buttons = btn || 0; }
       c.dispatchEvent(new cls((kind === 'pointer' ? 'pointer' : 'mouse') + type.slice(5), opt));
     };
@@ -196,6 +200,9 @@ window.__T = {
   press: function(x, y, btn){ this.mouse('mousedown', x, y, btn || 0); },
   release: function(x, y, btn){ this.mouse('mouseup', x, y, btn || 0); },
   moveTo: function(x, y){ this.mouse('mousemove', x, y, 0); },
+  // 自由转向：不按键挪光标（页面看 ev.buttons，非 0 就不推视角）
+  free: function(x, y){ this.mouse('mousemove', x, y, 0); },
+  holdMove: function(x, y){ this.mouse('mousemove', x, y, 1); },
   keydown: function(code, key){
     var c = document.getElementById('glcanvas');
     c.dispatchEvent(new KeyboardEvent('keydown', {bubbles: true, code: code, key: key}));
@@ -326,15 +333,63 @@ def click(s, x, y, btn=0, hold=0.35, after=0.7):
     time.sleep(after)
 
 
-def drag_look(s, x, y, dy, steps=6, per=0.09):
-    """按住拖动转视角：按下 → 分步移动（每步之间真的过帧）→ 松手。"""
-    m_press(s, x, y)
+CUR = [0, 0]          # 我们自己盯着光标在哪：画布就这么大，撞到边就得挪光标
+
+
+def free_move(s, x, y):
+    """不按键把光标挪到 (x,y)：现在鼠标一动页面就往 wasm 推视角。"""
+    s.ev("window.__T.free(%d, %d);" % (x, y))
+    CUR[0], CUR[1] = x, y
     time.sleep(0.12)
-    for i in range(1, steps + 1):
-        m_move(s, x, y + dy * i // steps)
+
+
+def hop_cursor(s, tx, ty):
+    """按住**中键**把光标挪走：按着的时候页面不推视角（不转），而中键松手在 Rust 那边是
+       「把准星指着的那种方块换到手里」，不会改地图，所以不会污染「改动」计数。"""
+    s.ev("window.__T.press(%d, %d, 1);" % (CUR[0], CUR[1]))
+    time.sleep(0.1)
+    s.ev("window.__T.holdMove(%d, %d);" % (tx, ty))
+    time.sleep(0.1)
+    s.ev("window.__T.release(%d, %d, 1);" % (tx, ty))
+    time.sleep(0.45)
+    CUR[0], CUR[1] = tx, ty
+
+
+def drag_look(s, x, y, dy, steps=6, per=0.12):
+    """把视角转 dy 像素对应的角度：不按键挪光标（鼠标一动就转）。
+       光标撞到画布上下边就用 hop_cursor 拉回中线接着走，累计角度不受窗口大小限制。"""
+    h = s.ev("return window.innerHeight;")
+    if CUR[0] == 0 and CUR[1] == 0:
+        CUR[0], CUR[1] = x, y
+    remain = dy
+    for _ in range(14):
+        if abs(remain) <= 1:
+            break
+        step = 260 if remain > 0 else -260
+        ty = max(24, min(h - 24, CUR[1] + step))
+        if abs(ty - CUR[1]) < 3:              # 撞到画布边了：把光标挪回中间再继续
+            hop_cursor(s, x, h // 2)
+            continue
+        free_move(s, CUR[0], ty)
+        remain -= (ty - CUR[1])
         time.sleep(per)
-    m_release(s, x, y + dy)
-    time.sleep(0.4)
+    return dy
+
+
+def pose(s):
+    p = s.ev("return window.__T.pose();")
+    return None if not p else [float(v) for v in p]
+
+
+def ang(a):
+    """把角度折到 (-pi, pi]：yaw 会绕圈，直接减会算出 2π 的假变化。"""
+    import math
+    a = float(a)
+    while a > math.pi:
+        a -= 2 * math.pi
+    while a <= -math.pi:
+        a += 2 * math.pi
+    return a
 
 
 def dig_with_aim(s, W, H, initial_dy=0):
@@ -457,8 +512,18 @@ def scene_base(u):
     pair = s.ev("return [String((window.__MCL_HUD || '').split('|')[3] || ''), "
                 "(document.getElementById('hud-clock') || {}).textContent || ''];")
     c2, dom_clock = (list(pair) + ["", ""])[:2]
-    log("桌面基础", "HUD 的时刻那一格在动、而且跟 wasm 推的一致",
-        c1 != c2 and dom_clock == c2, "%s → %s（同一瞬间读到的页面=%s）" % (c1, c2, dom_clock))
+    def mins(t):
+        try:
+            a, b = str(t).split(":")
+            return int(a) * 60 + int(b)
+        except Exception:
+            return -1
+    gap = mins(c2) - mins(dom_clock)
+    log("桌面基础", "HUD 的时刻那一格在动，页面写的和 wasm 推的对得上（最多差一分钟）",
+        c1 != c2 and 0 <= gap <= 1,
+        "%s → %s；同一瞬间 wasm=%s 页面=%s（差 %d 分钟：wasm 每 0.2 秒推一次，"
+        "页面每 200ms 才写一次 DOM，而游戏里一分钟只要约 0.25 秒真时间，落后一分钟是正常的）" % (
+            c1, c2, c2, dom_clock, gap))
     log("桌面基础", "HUD 本体和准星都显出来了",
         s.ev("return window.__T.vis('hud');") == "shown" and s.ev("return window.__T.vis('cross');") == "shown")
     log("桌面基础", "调试位姿解得出来", s.ev("return window.__T.pos() !== null ? 1 : 0;") == 1,
@@ -551,6 +616,67 @@ def scene_base(u):
     log("桌面基础", "按住 W 真的会前进（焦点已还给画布）", bool(moved > 0.5),
         "位移 %.2f（%s → %s）" % (moved, p0, p1))
 
+    # --- 方向类判据。公式和 phys.rs 里两条单元测试同源：
+    #     屏幕右 = cross(视线, 上) = (-cos yaw, 0, sin yaw)；yaw 增大是往**左**转
+    #     （那边拿渲染用的 Mat4::look_at_rh 实测过：yaw+0.3 之后原来正前方那点跑到画面右边 x=+2.96）。
+    def hold_key(code, ch, secs):
+        s.ev("window.__T.keydown('%s','%s');" % (code, ch))
+        time.sleep(secs)
+        s.ev("window.__T.keyup('%s','%s');" % (code, ch))
+        time.sleep(0.5)
+
+    def basis(p):
+        import math
+        return ([math.sin(p[3]), math.cos(p[3])], [-math.cos(p[3]), math.sin(p[3])])  # (前向, 屏幕右) 的 (x,z)
+
+    for key, ch, wantf, wantr, label in [
+        ("KeyS", "s", -1, 0, "按 S 是往后退"),
+        ("KeyD", "d", 0, 1, "按 D 是往屏幕右边平移（不是转向）"),
+        ("KeyA", "a", 0, -1, "按 A 是往屏幕左边平移（不是转向）"),
+    ]:
+        p0 = pose(s)
+        hold_key(key, ch, 1.5)
+        p1 = pose(s)
+        if not p0 or not p1:
+            log("桌面基础", label, None, "读不到位姿")
+            continue
+        f, r = basis(p0)
+        dx, dz = p1[0] - p0[0], p1[2] - p0[2]
+        along = dx * f[0] + dz * f[1]
+        side = dx * r[0] + dz * r[1]
+        dyaw = ang(p1[3] - p0[3])
+        ok = abs(dyaw) < 0.03
+        ok = ok and ((along * wantf > 0.5) if wantf else (abs(along) < 1.0))  # 视线那一维
+        ok = ok and ((side * wantr > 0.5) if wantr else (abs(side) < 1.0))    # 屏幕右那一维
+        log("桌面基础", label, ok,
+            "位移 (%.2f, %.2f)：沿视线 %.2f、沿屏幕右 %.2f（要 %s 那个方向为正），yaw 变了 %.4f" % (
+                dx, dz, along, side, "视线" if wantf else "屏幕右", dyaw))
+
+    # 鼠标一动就转，而且转的方向和鼠标移动同向：往右移光标 = 往右转 = yaw 要减
+    cx, cy = W // 2, H // 2
+    free_move(s, cx, cy)
+    free_move(s, cx, cy)                    # 头一拍只记起点，不产生转向
+    p0 = pose(s)
+    for kk in range(1, 9):
+        free_move(s, cx + 16 * kk, cy)
+    time.sleep(0.8)
+    p1 = pose(s)
+    want = -(16 * 8) * math.pi / 700.0
+    d_yaw = ang(p1[3] - p0[3]) if p0 and p1 else 0.0
+    log("桌面基础", "鼠标一动视角就转，而且往鼠标动的方向转",
+        bool(p0 and p1) and d_yaw < -0.1 and abs(d_yaw - want) < abs(want) * 0.6,
+        "光标右移 128 像素：yaw %.3f → %.3f（变了 %.3f，按 π/700 该是 %.3f：往右转 yaw 要减）" % (
+            p0[3], p1[3], d_yaw, want) if p0 and p1 else "读不到位姿")
+    for kk in range(7, -1, -1):
+        free_move(s, cx + 16 * kk, cy)
+    time.sleep(0.8)
+    p2 = pose(s)
+    log("桌面基础", "把鼠标挪回原地视角也转回去",
+        bool(p0 and p2) and abs(ang(p2[3] - p0[3])) < 0.12,
+        "转回去之后 yaw 还差 %.3f" % ang(p2[3] - p0[3]) if p0 and p2 else "")
+    free_move(s, cx, cy)
+    free_move(s, cx, cy)
+
     drag_look(s, W // 2, H // 2, 420)       # 压向地面：平视挖掉一格之后准星就只对着天空了
     total_dy, dug, d_cen2, d_ratio = dig_with_aim(s, W, H, initial_dy=420)
     for _ in range(2):
@@ -603,21 +729,30 @@ def scene_base(u):
     time.sleep(0.6)
     log("桌面基础", "再按 F 关飞行", "飞行" not in hud_field(s, 2), "模式=%s" % hud_field(s, 2))
 
-    m_press(s, W // 2, H // 2)               # 在画布外松手：旧版会把按键状态卡住，之后一动鼠标视角就自转
+    m_press(s, W // 2, H // 2)               # 在画布外松手：胶水只给画布绑了松手事件。跑着的时候在顶栏、页脚松的手，wasm 那边永远
+    # 看不到松手，鼠标键状态卡在「还按着」——而按着的时候页面是不推视角的，所以卡住的直接
+    # 表现变成「之后鼠标再怎么动都不转」（旧版没有自由转向，那会儿的表现是一动就自转）。
     time.sleep(0.35)
-    s.ev("var e=new MouseEvent('mouseup',{bubbles:true,clientX:%d,clientY:%d,button:0});"
+    p0 = pose(s)
+    s.ev("window.__T.press(%d, %d, 0);" % (W // 2, H // 2))
+    time.sleep(0.15)
+    s.ev("window.__T.holdMove(%d, 8);" % (W // 2))
+    time.sleep(0.15)
+    s.ev("var e=new MouseEvent('mouseup',{bubbles:true,clientX:%d,clientY:8,button:0,buttons:0});"
          "document.body.dispatchEvent(e);"
-         "var pe=new PointerEvent('pointerup',{bubbles:true,clientX:%d,clientY:%d,button:0,pointerId:1,pointerType:'mouse',isPrimary:true});"
-         "document.body.dispatchEvent(pe);" % (W // 2, H - 4, W // 2, H - 4))
-    time.sleep(0.2)
-    a = s.ev("return window.__T.sig();")
-    for k in range(6):
-        m_move(s, W // 2 + 20 + k * 6, H // 2 + k * 3)
-        time.sleep(0.12)
-    b = s.ev("return window.__T.sig();")
-    d2 = abs(b["cen"] - a["cen"]) if "err" not in a and "err" not in b else 9
-    log("桌面基础", "在画布外松手不会把鼠标键卡住（旧版一动鼠标画面就自转）", d2 < CEN,
-        "只移动鼠标：中心像素和变了 %d（阈值 %d）" % (d2, CEN))
+         "var pe=new PointerEvent('pointerup',{bubbles:true,clientX:%d,clientY:8,button:0,buttons:0,"
+         "pointerId:1,pointerType:'mouse',isPrimary:true});document.body.dispatchEvent(pe);"
+         % (W // 2, W // 2))
+    time.sleep(0.35)
+    CUR[0], CUR[1] = W // 2, 8
+    free_move(s, W // 2, H // 2)            # 回到画布里：这一拍只用来记起点
+    for kk in range(1, 9):
+        free_move(s, W // 2 + 16 * kk, H // 2)
+    time.sleep(0.8)
+    p1 = pose(s)
+    d_yaw = ang(p1[3] - p0[3]) if p0 and p1 else 0.0
+    log("桌面基础", "在画布外松手不会把鼠标键卡住（卡住的话之后鼠标再怎么动都不转）",
+        abs(d_yaw) > 0.15, "画布外松手后再自由挪 128 像素：yaw 又动了 %.3f" % d_yaw)
     errs = s.ev("return window.__T.errs();")
     log("桌面基础", "这一轮交互没有报错", not errs, "｜".join(errs[:3])[:160])
 
@@ -770,6 +905,36 @@ def scene_touch(u):
     # 平视挖掉面前那一格之后，准星就只对着天空了：压一次俯角，给后面这几刀和这次放方块备着目标
     tid = look_drag(tid, 420)
     dug1 = 0
+    def half_drag(dx, dy):
+        """右半屏拖一下（分步、每步真的过帧）。"""
+        s.ev("window.__T.tstart(%d, %d, %d);" % (tid, right[0], right[1]))
+        time.sleep(0.12)
+        for kk in range(1, 7):
+            s.ev("window.__T.tmove(%d, %d, %d);" % (tid, right[0] + dx * kk // 6, right[1] + dy * kk // 6))
+            time.sleep(0.09)
+        s.ev("window.__T.tend(%d, %d, %d);" % (tid, right[0] + dx, right[1] + dy))
+        time.sleep(0.5)
+        return tid + 1
+
+    p0 = pose(s)
+    tid = half_drag(150, 0)          # 往右拖
+    p1 = pose(s)
+    tid = half_drag(0, -150)         # 往上拖（先离地：pitch 夹紧在 ±(π/2−0.02)，抵着底再往下拖测不出变化）
+    p2 = pose(s)
+    tid = half_drag(0, 300)          # 再往下拖
+    p3 = pose(s)
+    if p0 and p1 and p2 and p3:
+        dyaw_r = ang(p1[3] - p0[3])
+        dpitch_u = p2[4] - p1[4]
+        dpitch_d = p3[4] - p2[4]
+        log("手机端触摸", "视角转动方向和手指拖动方向一致",
+            dyaw_r < -0.1 and dpitch_u > 0.1 and dpitch_d < -0.1,
+            "往右拖 150 像素：yaw %.3f → %.3f（往右转 yaw 该减，变了 %.3f）；"
+            "往上拖 150：pitch %.3f → %.3f（该抬，变了 %.3f）；往下拖 300：→ %.3f（该压，变了 %.3f）" % (
+                p0[3], p1[3], dyaw_r, p1[4], p2[4], dpitch_u, p3[4], dpitch_d))
+    else:
+        log("手机端触摸", "视角转动方向和手指拖动方向一致", None, "读不到位姿")
+
     for _ in range(3):
         n0 = changed_count(s)
         tap(tid, right[0], right[1]); tid += 1

@@ -50,13 +50,7 @@ impl Player {
 
     /// yaw 绕 Y，pitch 上下。yaw=0 时朝 +Z，和网格/射线的坐标约定一致。
     pub fn look_dir(&self) -> [f32; 3] {
-        let cp = self.pitch.cos();
-        let d = [cp * self.yaw.sin(), self.pitch.sin(), cp * self.yaw.cos()];
-        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-        if len < 1e-6 {
-            return [0.0, 0.0, 1.0];
-        }
-        [d[0] / len, d[1] / len, d[2] / len]
+        look_dir_of(self.yaw, self.pitch)
     }
 
     /// wish 是水平移动意图（已经按 yaw 旋转过，长度 <= 1）。
@@ -268,11 +262,88 @@ impl Player {
     }
 }
 
+/// 视线的单位向量：yaw 绕竖直轴（0 弧度朝 +Z），pitch 是仰角（正 = 抬头）。
+pub fn look_dir_of(yaw: f32, pitch: f32) -> [f32; 3] {
+    let cp = pitch.cos();
+    let d = [cp * yaw.sin(), pitch.sin(), cp * yaw.cos()];
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if len < 1e-6 {
+        return [0.0, 0.0, 1.0];
+    }
+    [d[0] / len, d[1] / len, d[2] / len]
+}
+
+/// 「屏幕右边」对应的世界方向（水平面内）。写成 [-cos, 0, sin] 不是笔误：
+/// 它是 cross(视线, 上)，也就是渲染那边 Mat4::look_at_rh 当成第一列用的那个方向。
+/// 以前抄成 [cos, 0, -sin]（视线的变化方向），于是 A/D 左右互换、按 D 往屏幕左边挪。
+/// 底下有条单元测试拿真正的相机矩阵钉着它。
+pub fn right_dir_of(yaw: f32) -> [f32; 3] {
+    [-yaw.cos(), 0.0, yaw.sin()]
+}
+
+/// 把输入位移（像素，x 向右为正、y 向下为正）换成朝向变化。符号只写这一处：
+/// yaw 增大是往**左**转，所以往右拖要减 yaw；pitch 是仰角，往下拖要减 pitch。
+/// 单元测试按 look_at_rh 的判据钉着这两个符号，改错了立刻红。
+pub fn turn_yaw_pitch(yaw: &mut f32, pitch: &mut f32, dx: f32, dy: f32, sens: f32) {
+    *yaw -= dx * sens;
+    *pitch -= dy * sens;
+    let lim = std::f32::consts::FRAC_PI_2 - 0.02;
+    *pitch = pitch.clamp(-lim, lim);
+    if *yaw > std::f32::consts::PI * 2.0 || *yaw < -std::f32::consts::PI * 2.0 {
+        *yaw = (*yaw).rem_euclid(std::f32::consts::PI * 2.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::blocks as b;
     use crate::world::{SX, SY, SZ, WATER_LEVEL};
+    use macroquad::prelude::{vec3, Mat4};
+
+    /// 相机到底把哪个世界方向当成屏幕右 —— 不靠推理，直接问渲染用的那个矩阵。
+    #[test]
+    fn 屏幕右边的方向由渲染矩阵定而不是靠直觉() {
+        // main.rs 建相机走 Camera3D → macroquad 的 Mat4::look_at_rh
+        // （macroquad-0.4.16/src/camera.rs:253）。视图 x 正方向 = 画面右边。
+        let up = vec3(0.0, 1.0, 0.0);
+        for yaw in [-2.2f32, -0.7, 0.0, 0.4, 1.3, 2.9] {
+            let d = look_dir_of(yaw, 0.0);
+            let m = Mat4::look_at_rh(vec3(0.0, 0.0, 0.0), vec3(d[0], d[1], d[2]), up);
+            let r = right_dir_of(yaw);
+            let v = m.transform_vector3(vec3(r[0], r[1], r[2]));
+            assert!(
+                v.x > 0.9,
+                "yaw={:.2}：right_dir_of 变换到视图里 x={:.3}，本该是正的（>0.9）——它就是屏幕右",
+                yaw,
+                v.x
+            );
+            assert!(v.y.abs() < 0.1, "yaw={:.2}：屏幕右不该带竖直分量（{:.3}）", yaw, v.y);
+        }
+    }
+
+    /// 「向右拖 = 往右转」这条判据很硬：yaw 变大之后，原来正前方十格那个点必须跑到新画面的左边
+    /// （往右转，画面里的东西才会往左滑）。顺便钉住输入那边的符号约定。
+    #[test]
+    fn 向右拖必须是往右转而不是往左转() {
+        let up = vec3(0.0, 1.0, 0.0);
+        let d = look_dir_of(0.3, 0.0);
+        let m = Mat4::look_at_rh(vec3(0.0, 0.0, 0.0), vec3(d[0], d[1], d[2]), up);
+        let v = m.transform_point3(vec3(0.0, 0.0, 10.0)); // 原来正前方那个点在新画面里的位置
+        // 实测：yaw=+0.3 之后那点落在新画面的 x=+2.96（≈ 10·tan 0.3，画面右边）。
+        // 内容往右滑 = 镜头往左转，所以 yaw 增大是往**左**转，输入那边必须反过来。
+        assert!(
+            v.x > 1.0,
+            "yaw 增大本该往左转（那点该跑到画面右边，实测 x={:.3}）",
+            v.x
+        );
+        let mut yaw = 0.0f32;
+        let mut pitch = 0.0f32;
+        turn_yaw_pitch(&mut yaw, &mut pitch, 100.0, 0.0, 0.01); // 往右拖
+        assert!(yaw < 0.0, "往右拖反而把 yaw 加到 {:.3}（那是往左转）", yaw);
+        turn_yaw_pitch(&mut yaw, &mut pitch, 0.0, 100.0, 0.01); // 往下拖
+        assert!(pitch < -0.9, "往下拖 pitch 只到 {:.3}（仰角该往下减）", pitch);
+    }
 
     /// 0..=WATER_LEVEL 实心、上面全空的平地（必须连上面一起清，生成的山和树还在）。
     fn flat_world() -> World {
