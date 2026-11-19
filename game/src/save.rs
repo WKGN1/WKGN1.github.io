@@ -9,11 +9,15 @@
 use crate::world::{World, SX, SY, SZ};
 
 const MAGIC: &[u8; 4] = b"MCL1";
-const VERSION: u8 = 1;
+/// v2 头部多一个 inv_len，尾巴上多一段背包。v1 也得读得懂：读者的旧档还在 IndexedDB 里、
+/// 还有已经下载出去的文件，升个格式不能把人家读不回来。
+const VERSION: u8 = 2;
+const VERSION_OLD: u8 = 1;
 const MAX_RUN: u64 = 255;
 
-/// 头部：MAGIC(4) + VERSION(1) + seed(4) + raw_len(4) + body_len(4)。
-const HEADER: usize = 17;
+/// 头部：MAGIC(4) + VERSION(1) + seed(4) + raw_len(4) + body_len(4)，v2 再 +inv_len(4)。
+const HEADER: usize = 21;
+const HEADER_OLD: usize = 17;
 
 /// 世界体素数。raw_len 必须正好等于它，读回来才敢照着它分配内存。
 const RAW_LEN: u64 = SX as u64 * SY as u64 * SZ as u64;
@@ -65,18 +69,20 @@ fn rle_decode(data: &[u8], expect_len: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// 把整个世界打包成一个可下载的字节流。
-pub fn encode(w: &World) -> Vec<u8> {
+/// 把世界 + 背包打包成一个可下载的字节流。背包段是定长字节（见 main.rs 的 inv_bytes）。
+pub fn encode(w: &World, inv: &[u8]) -> Vec<u8> {
     let raw = w.take_bytes();
     let body = rle_encode(raw);
 
-    let mut out = Vec::with_capacity(body.len() + 17);
+    let mut out = Vec::with_capacity(body.len() + inv.len() + HEADER);
     out.extend_from_slice(MAGIC);
     out.push(VERSION);
     out.extend_from_slice(&w.seed.to_le_bytes());
     out.extend_from_slice(&(raw.len() as u32).to_le_bytes());
     out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(inv.len() as u32).to_le_bytes());
     out.extend_from_slice(&body);
+    out.extend_from_slice(inv);
     out
 }
 
@@ -87,8 +93,18 @@ pub enum LoadError {
 }
 
 /// 解包。坏数据一律返回 Err，让调用方回落到「按 seed 新建世界」。
-pub fn decode(bytes: &[u8]) -> Result<(u32, Vec<u8>), LoadError> {
-    if bytes.len() < HEADER || &bytes[0..4] != MAGIC || bytes[4] != VERSION {
+/// 解包。返回 (种子, 世界字节, 背包段)；v1 没有背包段，给 None。
+pub fn decode(bytes: &[u8]) -> Result<(u32, Vec<u8>, Option<Vec<u8>>), LoadError> {
+    if bytes.len() < HEADER_OLD || &bytes[0..4] != MAGIC {
+        return Err(LoadError::BadFormat);
+    }
+    let v2 = match bytes[4] {
+        VERSION => true,
+        VERSION_OLD => false,
+        _ => return Err(LoadError::BadFormat),
+    };
+    let header = if v2 { HEADER } else { HEADER_OLD };
+    if bytes.len() < header {
         return Err(LoadError::BadFormat);
     }
     let seed = u32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]);
@@ -98,20 +114,39 @@ pub fn decode(bytes: &[u8]) -> Result<(u32, Vec<u8>), LoadError> {
     // panic=abort 的 wasm 里那就是 trap：主循环连一帧都不续，画面冻住，刷新还冻。
     let raw_len = u32::from_le_bytes([bytes[9], bytes[10], bytes[11], bytes[12]]) as u64;
     let body_len = u32::from_le_bytes([bytes[13], bytes[14], bytes[15], bytes[16]]) as u64;
-    let total = (HEADER as u64).checked_add(body_len).ok_or(LoadError::BadFormat)?;
+    // 背包段就 110 字节，先夹个宽上限：有人手改文件把 inv_len 写成 40 亿，
+    // 后面那个切片就直接越界了。
+    let inv_len = if v2 {
+        let n = u32::from_le_bytes([bytes[17], bytes[18], bytes[19], bytes[20]]) as u64;
+        if n > 4096 {
+            return Err(LoadError::BadFormat);
+        }
+        n
+    } else {
+        0
+    };
+    let total = (header as u64)
+        .checked_add(body_len)
+        .and_then(|t| t.checked_add(inv_len))
+        .ok_or(LoadError::BadFormat)?;
     if (bytes.len() as u64) < total {
         return Err(LoadError::BadFormat);
     }
-    let body_len = body_len as usize; // 到这儿 body_len <= bytes.len() - HEADER，截断是安全的
+    let body_len = body_len as usize; // 到这儿 body_len <= bytes.len() - header，截断是安全的
 
     // raw_len 也必须核：它是 rle_decode 的期望长度（以前完全没查）。
     // 核成「正好等于体素数」之后，expect_len 就不可能是几十亿，with_capacity 那条风险也一并没了。
     if raw_len != RAW_LEN {
         return Err(LoadError::WrongSize);
     }
-    let raw = rle_decode(&bytes[HEADER..HEADER + body_len], raw_len as usize)
+    let raw = rle_decode(&bytes[header..header + body_len], raw_len as usize)
         .ok_or(LoadError::WrongSize)?;
-    Ok((seed, raw))
+    let inv = if v2 {
+        Some(bytes[header + body_len..total as usize].to_vec())
+    } else {
+        None
+    };
+    Ok((seed, raw, inv))
 }
 
 #[cfg(test)]
@@ -122,8 +157,8 @@ mod tests {
     #[test]
     fn 存一遍再读回来必须一模一样() {
         let w = World::new(20261117);
-        let bytes = encode(&w);
-        let (seed, raw) = decode(&bytes).expect("自己存的该能读回来");
+        let bytes = encode(&w, b"\\x01\\x00");
+        let (seed, raw, _) = decode(&bytes).expect("自己存的该能读回来");
         assert_eq!(seed, w.seed);
         assert_eq!(raw, w.take_bytes());
     }
@@ -131,7 +166,7 @@ mod tests {
     #[test]
     fn 存档体积要小到能当附件发() {
         let w = World::new(7);
-        let bytes = encode(&w);
+        let bytes = encode(&w, b"");
         let raw = w.take_bytes().len();
         assert!(
             bytes.len() * 8 < raw,
@@ -147,14 +182,15 @@ mod tests {
         assert!(matches!(decode(&[]), Err(LoadError::BadFormat)));
 
         let w = World::new(9);
-        let mut good = encode(&w);
+        let mut good = encode(&w, b"");
         good.truncate(good.len() - 5); // 截断
         assert!(decode(&good).is_err(), "截断的文件该报错");
 
         let mut w2 = World::new(9);
         w2.set(10, 10, 10, b::LAMP);
-        let bytes = encode(&w2);
-        let (seed, raw) = decode(&bytes).unwrap();
+        let bytes = encode(&w2, b"abc");
+        let (seed, raw, inv) = decode(&bytes).unwrap();
+        assert_eq!(inv.as_deref(), Some(&b"abc"[..]), "背包段得原样回来");
         assert_eq!(seed, w2.seed);
         assert_eq!(raw, w2.take_bytes());
 
@@ -173,12 +209,40 @@ mod tests {
         );
 
         // raw_len 被改坏：它是 rle_decode 的期望长度，也决定 with_capacity 的量。
-        let mut bad_raw = encode(&w);
+        let mut bad_raw = encode(&w, b"");
         bad_raw[9..13].copy_from_slice(&((RAW_LEN as u32) ^ 0xFFFF_FFFF).to_le_bytes());
         assert!(
             matches!(decode(&bad_raw), Err(LoadError::WrongSize)),
             "raw_len 不对时必须报错，不能照着它分配内存"
         );
+    }
+
+    #[test]
+    fn v1的老档还得读得懂而且没有背包段() {
+        // 拿 v2 的结果手工削成 v1 头部：MCL1 + 版本 1 + 四个长度字段里没有 inv_len
+        let w = World::new(4242);
+        let v2 = encode(&w, b"");
+        let body_len = usize::try_from(u32::from_le_bytes([v2[13], v2[14], v2[15], v2[16]])).unwrap();
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(MAGIC);
+        v1.push(VERSION_OLD);
+        v1.extend_from_slice(&v2[5..9]);
+        v1.extend_from_slice(&v2[9..17]);
+        v1.extend_from_slice(&v2[HEADER..HEADER + body_len]);
+        let (seed, raw, inv) = decode(&v1).expect("v1 档必须还能读，读者的旧档就是这个");
+        assert_eq!(seed, w.seed);
+        assert_eq!(raw, w.take_bytes());
+        assert_eq!(inv, None, "v1 没有背包段");
+    }
+
+    #[test]
+    fn 背包段长度被吹大时必须报错不能越界() {
+        let w = World::new(77);
+        let mut b = encode(&w, &[3u8; 110]);
+        b[17..21].copy_from_slice(&60_000u32.to_le_bytes()); // 比整份文件还长
+        assert!(matches!(decode(&b), Err(LoadError::BadFormat)), "inv_len 吹大该报错");
+        b[17..21].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        assert!(matches!(decode(&b), Err(LoadError::BadFormat)), "inv_len 回绕该报错");
     }
 
     #[test]

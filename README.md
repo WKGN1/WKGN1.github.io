@@ -67,13 +67,14 @@ git add -A && git commit -m "写一篇" && git push    # 推到 GitHub 自动上
   门面收没、点一下「改动」会不会 +1，最后一行打 `PASS 彩蛋能跑能挖` 才算过）。
   换手机宽度：`GAME_W=414 GAME_H=820 python3 gamecheck.py`。直接测线上：
   `GAME_URL=https://wkgn1.github.io/game/index.html?autoplay=1 python3 gamecheck.py`。
-- 想彻底验：`python3 game/regress.py`（约 20 分钟，104 条断言，七组：桌面基础 / 静态 / 无 WebGL /
+- 想彻底验：`python3 game/regress.py`（约 25 分钟，125 条断言，七组：桌面基础 / 静态 / 无 WebGL /
   看门狗 / 门面 / 手机触摸 / 浸泡）。它自己起本地服务、自己开无头 Firefox，测的是 `dist/`，
   所以要先 `bash game/build-wasm.sh && python3 build.py`。改 `loader.js` 之前先跑一次记下基线。
   它的判据怎么定的、有哪些坑（跨帧输入、俯仰灵敏度、无头报不出触屏）写在 `HANDOFF.md` 第十二节。
 - **操作方向**：桌面 W 前进、S 后退、A 左移、D 右移，鼠标一动就转向（按着鼠标的时候不转，那一下是要挖/放），左键挖、右键放、中键换方块、1-9 或滚轮换栏、F 飞行、Shift 加速/下降、空格跳；手机左半屏拖=走、右半屏拖=转向（和手指同向）、点一下挖、按住放、双击飞，跳/飞/换方块用上面那排按钮。
   所有转向符号集中在 `game/src/phys.rs` 的 `right_dir_of` / `turn_yaw_pitch` 两处，键盘、摇杆、鼠标、自由转向都走它们；`phys.rs` 里有两条单元测试拿渲染用的 `Mat4::look_at_rh` 钉着方向（"屏幕右 = cross(视线, 上)"、"往右拖必须减 yaw"）。**改方向之前先看那两条**，改错了它们会红。
   桌面自由转向是 `loader.js` 里的 `pushLook` 攒鼠标位移、wasm 每帧经 `mcl_free_look / mcl_take_look_x / mcl_take_look_y` 取走；能 `requestPointerLock` 就锁（转圈不受画布大小限制），锁不上就退回按 `clientX/clientY` 差分，两条路都得能跑。
+- **背包 / 物品栏 / 工作台**：HUD 上「物品栏」按钮（电脑上按 `E`）开面板：快捷栏 9 格 + 背包 27 格 + 5 条配方。默认**创造**（随便挖随便放、数量显示 ∞），`G` 或面板里那个按钮切到**生存**：挖了掉进背包、放下扣一个、`木板×4 → 工作台` 合出台子放地上、站旁边才解锁高阶配方。数据走 HUD 第 10 段、操作走命令队列，都在 `game/src/inv.rs` + `game/web/loader.js`。存档因此升到 v2（多一段背包），**v1 的老档照样能读**。
 - **全屏 / 横屏**：顶栏「全屏」按钮三条路 —— 有全屏 API 的整页 `requestFullscreen`，进去后 `screen.orientation.lock('landscape')`（安卓这就横屏了，桌面自己忽略这句）；iPhone / 微信 iOS 内核没有元素全屏 API，退回 CSS 横屏（整页宽高对调再转 90°）；两个都不给的什么都不做。横屏模式下输入坐标由 `loader.js` 的 `unrotate()` 换算回胶水认的那套（改的是 `MouseEvent.prototype` / `Touch.prototype` 的 getter，不是事件对象 —— 盖在事件上胶水读不到）。Esc 或再点一次退出。
 - 入口文案写死在两处：`templates/home.html`（首页那颗「方块彩蛋」按钮）、
   `templates/404.html`（右栏「藏了个东西」那行）。要去掉入口就删这两处。

@@ -17,8 +17,14 @@ pub const LEAF: u8 = 8;
 pub const SNOW: u8 = 9;
 pub const LAMP: u8 = 10;
 pub const SNOW_GRASS: u8 = 11; // 生成时用的过渡块：草但顶面是雪
+pub const WORKBENCH: u8 = 12; // 工作台：合成高阶配方的门槛，只能合成出来
 
-// 纹理图集：12 张 16x16 的贴片排在同一行，尺寸 192x16。
+/// 创造模式下给的全套（水也算：创造能凭空放出水来）。
+pub const ALL_PLACEABLE: [u8; 11] = [
+    GRASS, DIRT, STONE, SAND, WOOD, PLANK, LEAF, SNOW, LAMP, WORKBENCH, WATER,
+];
+
+// 纹理图集：14 张 16x16 的贴片排在同一行，尺寸 224x16。
 pub const TILE_SIDE: u8 = 0;
 pub const TILE_TOP: u8 = 1;
 pub const TILE_BOTTOM: u8 = 2;
@@ -31,10 +37,12 @@ pub const TILE_SNOW_SIDE: u8 = 8;
 pub const TILE_LAMP: u8 = 9;
 pub const TILE_PLANK: u8 = 10;
 pub const TILE_WATER: u8 = 11;
+pub const TILE_BENCH_SIDE: u8 = 12;
+pub const TILE_BENCH_TOP: u8 = 13;
 
 pub const TILE_PX: u32 = 16;
-pub const TILE_COUNT: u32 = 12;
-pub const ATLAS_W: u32 = TILE_PX * TILE_COUNT; // 192
+pub const TILE_COUNT: u32 = 14;
+pub const ATLAS_W: u32 = TILE_PX * TILE_COUNT; // 224
 pub const ATLAS_H: u32 = TILE_PX; // 16
 
 /// 快捷栏：数字键 1..9 的顺序。
@@ -48,7 +56,7 @@ pub fn is_air(id: u8) -> bool {
 pub fn is_solid(id: u8) -> bool {
     matches!(
         id,
-        GRASS | DIRT | STONE | SAND | WOOD | PLANK | LEAF | SNOW | LAMP | SNOW_GRASS
+        GRASS | DIRT | STONE | SAND | WOOD | PLANK | LEAF | SNOW | LAMP | SNOW_GRASS | WORKBENCH
     )
 }
 
@@ -108,6 +116,13 @@ pub fn face_tile(id: u8, face: usize) -> u8 {
         PLANK => TILE_PLANK,
         LEAF => TILE_LEAF,
         LAMP => TILE_LAMP,
+        WORKBENCH => {
+            if face == 3 {
+                TILE_BENCH_TOP
+            } else {
+                TILE_BENCH_SIDE
+            }
+        }
         _ => TILE_SIDE,
     }
 }
@@ -125,6 +140,7 @@ pub fn block_name(id: u8) -> &'static str {
         LEAF => "树叶",
         SNOW => "雪块",
         LAMP => "萤石灯",
+        WORKBENCH => "工作台",
         _ => "空气",
     }
 }
@@ -224,6 +240,27 @@ fn paint_tile(tile: u8, x: u32, y: u32) -> [u8; 3] {
             let base = rgb(181, 138, 78);
             shade(base, 1.0 - seam * 0.30 + j * 0.07)
         }
+        TILE_BENCH_SIDE => {
+            // 侧面：木板上沿压一道深色边，中间两条工具痕
+            let base = rgb(168, 126, 72);
+            if y < 3 {
+                shade(base, 0.66 + j * 0.05)
+            } else if y == 7 || y == 11 {
+                shade(base, 0.78 + j * 0.05)
+            } else {
+                shade(base, 1.0 + j * 0.07)
+            }
+        }
+        TILE_BENCH_TOP => {
+            // 顶面：四块板拼的井字格，正是「工作台」那张脸
+            let base = rgb(188, 144, 84);
+            let seam = (x % 8 == 0) as u32 + (y % 8 == 0) as u32;
+            if seam > 0 {
+                shade(base, 0.68 + j * 0.04)
+            } else {
+                shade(base, 1.0 + j * 0.07)
+            }
+        }
         TILE_WATER => {
             // 横向波纹 + 细噪点：不动图仿动图，省下时间做多卡动画
             let band = (((y as f32 + (x as f32 * 0.35)) * 1.1).sin() + 1.0) * 0.5;
@@ -263,6 +300,28 @@ mod tests {
         assert_eq!(a.len(), (ATLAS_W * ATLAS_H * 4) as usize);
         for px in a.chunks_exact(4) {
             assert_eq!(px[3], 255, "图集不该有透明像素，透明会让方块面漏光");
+        }
+    }
+
+    #[test]
+    fn 每种方块的每一面都用得上图集里的贴片() {
+        for id in 1..=WORKBENCH {
+            for face in 0..6 {
+                let t = face_tile(id, face);
+                assert!((t as u32) < TILE_COUNT, "方块 {} 第 {} 面指到了图外的贴片 {}", id, face, t);
+            }
+        }
+    }
+
+    #[test]
+    fn 工作台是实体方块也在创造全套里() {
+        assert!(is_solid(WORKBENCH));
+        assert!(!is_transparent(WORKBENCH));
+        assert_eq!(block_name(WORKBENCH), "工作台");
+        assert!(ALL_PLACEABLE.contains(&WORKBENCH));
+        assert_eq!(ALL_PLACEABLE.len(), 11);
+        for id in ALL_PLACEABLE {
+            assert!(!is_air(id));
         }
     }
 

@@ -57,18 +57,17 @@
             <div class="g-hud-btns" id="hud-btns" hidden>
               <button id="btn-jump" class="g-hud-btn" type="button">跳</button>
               <button id="btn-fly" class="g-hud-btn" type="button">飞</button>
-              <button id="btn-slot-prev" class="g-hud-btn" type="button" aria-label="上一个方块">‹ 上一个</button>
-              <button id="btn-slot-next" class="g-hud-btn" type="button" aria-label="下一个方块">下一个 ›</button>
+              <button id="btn-inv" class="g-hud-btn" type="button">物品栏</button>
             </div>
           </div>
           <div class="g-hud-bottom">
             <!-- Rust 推的第 8 段：飞行提示之类。空的时候这边会把它收掉，别挂个空块 -->
             <div class="g-hud-note" id="hud-note">正在读本地 IndexedDB</div>
             <div class="g-hint" id="hint-desktop">
-              W前进 S后退 A左 D右 · 移动鼠标转向 · 左键挖 · 右键放 · 1-9 换方块 · F 飞行 · Shift 加速 · 空格 跳 · 全屏
+              W前进 S后退 A左 D右 · 移动鼠标转向 · 左键挖 · 右键放 · 1-9 换方块 · E 物品栏 · G 创造/生存 · F 飞行 · Shift 加速 · 空格 跳 · 全屏
             </div>
             <div class="g-hint" id="hint-touch" hidden>
-              左半屏拖=走 · 右半屏拖=转向（跟手指同向） · 点一下=挖 · 按住=放 · 双击=飞行 · 跳/飞/换方块用上面那排按钮 · 全屏（自动横屏）
+              左半屏拖=走 · 右半屏拖=转向（跟手指同向） · 点一下=挖 · 按住=放 · 双击=飞行 · 跳/飞用上面那排按钮 · 物品栏里点着换方块 · 全屏（自动横屏）
             </div>
           </div>
         </div>
@@ -105,7 +104,22 @@
           </div>
         </div>
       </div>
-    </main>
+    <!-- 物品栏：背包 27 格 + 快捷栏 9 格 + 合成。数据来自 HUD 第 10 段（Rust 推的），
+       点格子/配方是往 Rust 的命令队列里塞一条（见 loader.js 的 uiCmd）。 -->
+  <div class="g-inv" id="inv" hidden>
+    <div class="g-inv-back" id="inv-back"></div>
+    <div class="g-inv-card">
+      <div class="g-inv-head">
+        <b>物品栏</b>
+        <span class="g-inv-tag" id="inv-bench">旁边没工作台</span>
+        <button class="g-inv-btn" id="inv-mode" type="button">改成生存</button>
+        <button class="g-inv-btn" id="inv-close" type="button">关闭</button>
+      </div>
+      <div class="g-inv-body" id="inv-body"></div>
+      <div class="g-inv-foot">点背包格子 = 跟手上那格对调 · 电脑上按 E 开 / 关、G 切创造生存</div>
+    </div>
+  </div>
+  </main>
 
     <footer class="g-foot">
       <span id="foot-note">改动每 3 秒自动存进本地 IndexedDB；清浏览器缓存会丢，要紧的话点「导出存档」。</span>

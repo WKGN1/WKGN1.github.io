@@ -180,11 +180,14 @@ window.__T = {
   // 同时补一份 pointer*：有些胶水只听 pointer，只听 mouse 也会漏。
   mouse: function(type, x, y, btn){
     var c = document.getElementById('glcanvas');
+    var up = type.indexOf('up') >= 0;   // mouseup 的时候浏览器把 buttons 清成 0：跟着做，
+                                        // 否则胶水看不见「松开」，右键放方块永远不触发
     var mk = function(kind){
       var cls = kind === 'pointer' ? window.PointerEvent : window.MouseEvent;
       if (!cls) return;
-      var opt = {bubbles: true, cancelable: true, clientX: x, clientY: y, button: btn || 0, buttons: btn || 0, view: window};
-      if (kind === 'pointer') { opt.pointerId = 1; opt.pointerType = 'mouse'; opt.isPrimary = true; opt.buttons = btn || 0; }
+      var down = up ? 0 : (btn || 0);
+      var opt = {bubbles: true, cancelable: true, clientX: x, clientY: y, button: btn || 0, buttons: down, view: window};
+      if (kind === 'pointer') { opt.pointerId = 1; opt.pointerType = 'mouse'; opt.isPrimary = true; opt.buttons = down; }
       c.dispatchEvent(new cls((kind === 'pointer' ? 'pointer' : 'mouse') + type.slice(5), opt));
     };
     mk('mouse'); mk('pointer');
@@ -498,7 +501,7 @@ def scene_base(u):
         % (round(time.time() - t_boot, 1), s.ev("return window.__T.vis('gate');")))
     log("桌面基础", "兜底没露出", s.ev("return window.__T.vis('fallback');") == "hidden")
     hud = s.ev("return window.__MCL_HUD;")
-    log("桌面基础", "HUD 有 9 段（第 9 段是给我的调试位姿）", len(hud.split("|")) == 9, hud)
+    log("桌面基础", "HUD 有 10 段（第 10 段是物品栏的数据）（第 10 段是给我的调试位姿）", len(hud.split("|")) == 10, hud)
     dom = s.ev("return ['hud-slot','hud-block','hud-mode','hud-clock','hud-changed','hud-fps','hud-save','hud-note']"
                ".map(function(i){ var e=document.getElementById(i); return e ? e.textContent : '(没有这个元素)'; });")
     parts = hud.split("|")
@@ -753,6 +756,187 @@ def scene_base(u):
     d_yaw = ang(p1[3] - p0[3]) if p0 and p1 else 0.0
     log("桌面基础", "在画布外松手不会把鼠标键卡住（卡住的话之后鼠标再怎么动都不转）",
         abs(d_yaw) > 0.15, "画布外松手后再自由挪 128 像素：yaw 又动了 %.3f" % d_yaw)
+    # ---------------- 背包 / 快捷栏 / 工作台（物品栏） ----------------
+    def invf():
+        """HUD 第 10 段（物品栏那一份数据）解析成 dict：C/B/S/N/H/G/R/A。"""
+        return s.ev(
+            "var t=String(window.__MCL_HUD||'').split('|')[9]||'';var f={};"
+            "var ps=t.split(';');for(var i=0;i<ps.length;i++){var k=ps[i].indexOf(':');"
+            "if(k<1)continue;f[ps[i].slice(0,k)]=ps[i].slice(k+1);}return f;")
+
+    def bag(f, key):
+        out = {}
+        for p in str(f.get(key, '')).split(','):
+            kv = p.split(':')
+            if len(kv) == 2 and (kv[0] or '0').isdigit() and (kv[1] or '0').isdigit():
+                if int(kv[0]) and int(kv[1]):
+                    out[int(kv[0])] = out.get(int(kv[0]), 0) + int(kv[1])
+        return out
+
+    def total(f, iid):
+        return bag(f, 'H').get(iid, 0) + bag(f, 'G').get(iid, 0)
+
+    def where(f, iid):
+        """这种方块在面板里的第几个格子（背包那 27 格排在手上的 9 格后面）。"""
+        hs = str(f.get('H', '')).split(',')
+        for i, p in enumerate(hs):
+            if p.startswith('%d:' % iid):
+                return i
+        gs = str(f.get('G', '')).split(',')
+        for i, p in enumerate(gs):
+            if p.startswith('%d:' % iid):
+                return 9 + i
+        return None
+
+    def try_dig():
+        """在准星附近找有目标的俯角挖一刀：返回（改动前后, 背包计数前后）。"""
+        for dy in (0, -120, 120, -240, 240):
+            if dy:
+                drag_look(s, W // 2, H // 2, dy)
+            a0, b0 = changed_count(s), bag_all()
+            click(s, W // 2, H // 2, 0)
+            a1, b1 = changed_count(s), bag_all()
+            if a1 > a0:
+                return a0, a1, b0, b1
+        return a0, a1, b0, b1
+
+    def try_place():
+        """同样在准星附近找放得下去的角度（刚挖的那个洞一定能放：这是旧版就摸出来的打法）。"""
+        for dy in (0, -120, 120, -240, 240):
+            if dy:
+                drag_look(s, W // 2, H // 2, dy)
+            a0, b0 = changed_count(s), bag_all()
+            click(s, W // 2, H // 2, 2)
+            a1, b1 = changed_count(s), bag_all()
+            if a1 > a0:
+                return a0, a1, b0, b1
+        return a0, a1, b0, b1
+
+    def bag_all():
+        f = invf()
+        m = dict(bag(f, 'H'))
+        for k, v in bag(f, 'G').items():
+            m[k] = m.get(k, 0) + v
+        return m
+
+    def diff_counts(a, b):
+        d = {k: b.get(k, 0) - a.get(k, 0) for k in set(a) | set(b)}
+        return {k: v for k, v in d.items() if v}
+
+    f = invf()
+    fields = ''.join(sorted(k for k in ('A', 'B', 'C', 'G', 'H', 'N', 'R', 'S') if k in f))
+    log("背包工作台", "HUD 第 10 段带齐物品栏要的 8 个字段", fields == 'ABCGHNRS', "字段=%s" % fields)
+    full9 = len([p for p in str(f.get('H', '')).split(',') if p.split(':')[0] != '0'])
+    log("背包工作台", "默认是创造：快捷栏 9 格都有方块、数量一律 0（界面画 ∞）",
+        str(f.get('C')) == '1' and full9 == 9, "创造=%s 快捷栏=%s" % (f.get('C'), f.get('H')))
+
+    s.ev("window.__MCL_INV_OPEN(1);")
+    time.sleep(0.9)
+    cells = s.ev("return document.querySelectorAll('#inv-body .g-inv-cell').length;")
+    recs = s.ev("return document.querySelectorAll('#inv-body .g-inv-rec').length;")
+    hid = s.ev("return document.getElementById('inv').hidden;")
+    txt = s.ev("return document.getElementById('inv-body').textContent.replace(/\\s+/g,'');")
+    log("背包工作台", "物品栏面板开得出：36 格 + 5 条配方都在",
+        cells == 36 and recs == 5 and hid is False,
+        "格子 %d 个、配方 %d 条、hidden=%s" % (cells, recs, hid))
+    log("背包工作台", "创造给的全套在面板里都画得出来（含背包那两格：工作台、水）",
+        '工作台∞' in txt and '水∞' in txt, "面板文字=%r…" % txt[:110])
+
+    n0 = changed_count(s)
+    click(s, W // 2, H // 2, 0)
+    n1 = changed_count(s)
+    log("背包工作台", "面板开着 = 暂停：这一刀挖不动也不改地图", n1 == n0, "改动 %d → %d" % (n0, n1))
+    s.ev("window.__MCL_INV_OPEN(0);")
+    time.sleep(0.7)
+
+    s.ev("document.getElementById('inv-mode').click();")   # 命令 300：切生存（面板这会儿开着，hidden 元素 click 照样派发）
+    time.sleep(1.0)
+    f = invf()
+    log("背包工作台", "点「改成生存」真换了：模式那格写生存、手里带数量",
+        '生存' in str(hud_field(s, 2)) and str(f.get('C')) == '0' and '×' in str(hud_field(s, 1)),
+        "模式=%s 手里=%s 快捷栏=%s" % (hud_field(s, 2), hud_field(s, 1), f.get('H')))
+    s.ev("window.__MCL_GIVE(6, 1);")          # 留 1 个木头待会合成
+    time.sleep(0.6)
+    s.ev("window.__MCL_INV_OPEN(0);")
+    time.sleep(0.7)
+
+    a0, a1, b0, b1 = try_dig()
+    g = diff_counts(b0, b1)
+    log("背包工作台", "生存挖一下：改动 +1，而且掉一个进背包",
+        a1 > a0 and len(g) == 1 and list(g.values())[0] == 1,
+        "改动 %d → %d，背包计数变化 %s" % (a0, a1, g))
+    sel = int(invf().get('S', '1'))
+    before = str(invf().get('H', '')).split(',')[sel - 1]
+    p0, p1, _, _ = try_place()
+    after = str(invf().get('H', '')).split(',')[sel - 1]
+    got = int(after.split(':')[1] or 0) if ':' in after else 0
+    want = int(before.split(':')[1] or 0) if ':' in before else 0
+    log("背包工作台", "生存放一下：改动 +1，而且手里那格扣一个",
+        p1 > p0 and got == want - 1, "改动 %d → %d，手里 %s → %s" % (p0, p1, before, after))
+
+    s.ev("window.__MCL_INV_OPEN(1);")
+    time.sleep(0.9)
+    f = invf()
+    w0, pl0 = total(f, 6), total(f, 7)
+    s.ev("var b = document.querySelector('#inv-body .g-inv-rec button'); b.click();")
+    time.sleep(1.0)
+    f = invf()
+    w1, pl1 = total(f, 6), total(f, 7)
+    log("背包工作台", "合成第一条：木头 1 → 木板 4（扣料、产物进背包）",
+        pl1 - pl0 == 4 and w1 == w0 - 1, "木头 %d → %d，木板 %d → %d，能不能合=%s" % (w0, w1, pl0, pl1, f.get('A')))
+    note = str(hud_field(s, 7))
+    log("背包工作台", "合成会给玩家留话（HUD 第 8 段）", '木板' in note, "备注=%r" % note[:60])
+
+    s.ev("window.__MCL_GIVE(7, 8);")          # 补木板，够合成工作台
+    time.sleep(0.7)
+    s.ev("var bs = document.querySelectorAll('#inv-body .g-inv-rec button'); bs[1].click();")
+    time.sleep(1.0)
+    f = invf()
+    cell = where(f, 12)
+    log("背包工作台", "木板 4 → 工作台 1，而且这条不要求旁边先有工作台（不然第一张永远做不出）",
+        total(f, 12) >= 1 and cell is not None, "工作台 %d 个，在面板第 %s 格" % (total(f, 12), cell))
+    if cell is not None:
+        s.ev("document.querySelectorAll('#inv-body .g-inv-cell')[%d].click();" % cell)
+        time.sleep(0.9)
+        held = str(hud_field(s, 1))
+        log("背包工作台", "面板里点一下就把那格换到手上", '工作台' in held, "手里=%s 选中=%s" % (held, invf().get('S')))
+    s.ev("window.__MCL_INV_OPEN(0);")
+    time.sleep(0.7)
+    q0, q1, _, _ = try_place()
+    f = invf()
+    log("背包工作台", "工作台放到地上，人就站在旁边（B 段变 1）", q1 > q0 and str(f.get('B')) == '1',
+        "改动 %d → %d，B=%s" % (q0, q1, f.get('B')))
+    s.ev("window.__MCL_GIVE(8, 4);")          # 树叶 4：解锁的那条该能合
+    time.sleep(0.8)
+    s.ev("window.__MCL_INV_OPEN(1);")
+    time.sleep(0.9)
+    f = invf()
+    flags = str(f.get('A', '')).split(',')
+    wo0, le0 = total(f, 6), total(f, 8)
+    log("背包工作台", "高阶配方要站在工作台旁边才解锁（A 段里那条是 1）",
+        len(flags) >= 3 and flags[2] == '1', "能不能合=%s" % f.get('A'))
+    s.ev("var bs2 = document.querySelectorAll('#inv-body .g-inv-rec button'); bs2[2].click();")
+    time.sleep(1.0)
+    f = invf()
+    wo1, le1 = total(f, 6), total(f, 8)
+    log("背包工作台", "高阶配方真能合：树叶 4 → 木头 1", wo1 - wo0 == 1 and le1 == le0 - 4,
+        "树叶 %d → %d，木头 %d → %d" % (le0, le1, wo0, wo1))
+
+    s.ev("document.getElementById('inv-mode').click();")   # 切回创造
+    time.sleep(0.9)
+    note_toggle = str(hud_field(s, 7))                      # 备注 12 秒就自己没了，趁热读
+    s.ev("window.__MCL_INV_OPEN(0);")
+    time.sleep(0.7)
+    try_dig()                                              # 先挖个洞，放才一定有地方放
+    r0, r1, _, _ = try_place()
+    f = invf()
+    log("背包工作台", "切回创造：数量记 ∞、放方块不扣料",
+        str(f.get('C')) == '1' and r1 > r0 and '∞' in str(hud_field(s, 1))
+        and not bag(f, 'H') and not bag(f, 'G'),
+        "手里=%s 改动 %d → %d，背包里记的数=%s（空 = 一个数都没记）" % (hud_field(s, 1), r0, r1, bag(f, 'H')))
+    log("背包工作台", "切模式也会给玩家留话（HUD 第 8 段）",
+        '生存' in note_toggle or '创造' in note_toggle, "备注=%r" % note_toggle[:60])
+
     errs = s.ev("return window.__T.errs();")
     log("桌面基础", "这一轮交互没有报错", not errs, "｜".join(errs[:3])[:160])
 
@@ -866,8 +1050,8 @@ def scene_touch(u):
     log("手机端触摸", "触屏 HUD 按钮出来了（跳/飞/换方块）",
         (None if not touch_env else
          s.ev("return window.__T.vis('btn-jump');") == "shown" and s.ev("return window.__T.vis('btn-fly');") == "shown"),
-        "跳=%s 飞=%s 上一个=%s 下一个=%s" % (s.ev("return window.__T.vis('btn-jump');"), s.ev("return window.__T.vis('btn-fly');"),
-                                          s.ev("return window.__T.vis('btn-slot-prev');"), s.ev("return window.__T.vis('btn-slot-next');")))
+        "跳=%s 飞=%s 物品栏=%s 物品栏=%s" % (s.ev("return window.__T.vis('btn-jump');"), s.ev("return window.__T.vis('btn-fly');"),
+                                          s.ev("return window.__T.vis('btn-inv');"), s.ev("return window.__T.vis('btn-slot-next');")))
 
     def tap(tid, x, y, gap=0.14, after=1.0):
         s.ev("window.__T.tstart(%d, %d, %d);" % (tid, x, y))
@@ -1002,11 +1186,18 @@ def scene_touch(u):
     log("手机端触摸", "点 HUD「跳」按钮真的会跳（旧版手机没有跳的入口）", bool(p0 and p1 and p1[1] > p0[1] + 0.08),
         "y %.2f → %.2f" % (p0[1], p1[1]) if p0 and p1 else "读不到位姿")
     slot0 = hud_field(s, 0)
-    s.ev("document.getElementById('btn-slot-next').click();")
-    time.sleep(0.8)
+    s.ev("document.getElementById('btn-inv').click();")
+    time.sleep(0.9)
+    opened = s.ev("return document.getElementById('inv').hidden;")
+    s.ev("var cs = document.querySelectorAll('#inv-body .g-inv-cell');"
+         "if (cs.length > 1) cs[1].click();")
+    time.sleep(0.9)
     slot1 = hud_field(s, 0)
-    log("手机端触摸", "点 HUD「下一个方块」会换方块（旧版手机换不了）", slot0 != slot1,
-        "槽位 %s → %s，方块名=%s" % (slot0, slot1, hud_field(s, 1)))
+    log("手机端触摸", "手机上点 HUD「物品栏」开面板、点格子就换手上那格（旧版是俩换方块按钮）",
+        opened is False and slot0 != slot1,
+        "面板 hidden=%s，槽位 %s → %s，手里=%s" % (opened, slot0, slot1, hud_field(s, 1)))
+    s.ev("window.__MCL_INV_OPEN(0);")
+    time.sleep(0.5)
     s.ev("document.getElementById('btn-fly').click();")
     time.sleep(0.8)
     log("手机端触摸", "点 HUD「飞」按钮会切飞行", "飞行" in hud_field(s, 2), "模式=%s" % hud_field(s, 2))
@@ -1166,6 +1357,13 @@ def scene_static(u):
          "applyRotate" in L and "g-rot" in C and "rotate(90deg)" in C),
         ("横屏模式下输入坐标在 window 捕获相换算（胶水读的是 clientX 减画布 rect）",
          "fixInput" in L and "unrotate" in L and "getBoundingClientRect" in L),
+        ("HUD 第 10 段有人接（背包数据推了不会白推）", "parts[9]" in L and "renderInv" in L),
+        ("「物品栏」入口在 HUD 上，旧的 ‹上一个 / 下一个› 两个按钮换掉了",
+         "btn-inv" in I and "btn-slot-next" not in I and "btn-slot-prev" not in I),
+        ("面板壳和样式都在：背包格子、配方行、模式开关、关闭",
+         'id="inv-body"' in I and 'id="inv-mode"' in I and ".g-inv-grid" in C and ".g-inv-rec" in C),
+        ("背包数据是按字段名读的（往后加字段不用数第几段）",
+         all(k in L for k in ("parseInv", "f.C", "f.B", "f.S", "f.R", "f.A"))),
     ]
     for item in checks:
         log("静态检查", item[0], item[1], item[2] if len(item) > 2 else "")

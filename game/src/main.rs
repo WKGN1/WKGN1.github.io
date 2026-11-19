@@ -8,6 +8,7 @@
 //! 参数只有整数（指针、长度、偏移）。好处是不用 wasm-bindgen，构建就一条 cargo 命令。
 
 mod blocks;
+mod inv;
 mod mesh;
 mod noise;
 mod phys;
@@ -82,6 +83,8 @@ extern "C" {
     fn mcl_take_jump() -> i32;
     fn mcl_take_fly() -> i32;
     fn mcl_take_slot() -> i32;
+    /// 「物品栏」面板发来的命令：取走一条，队列空了返回 0。
+    fn mcl_take_ui_cmd() -> i32;
     /// 告诉页面「世界建好了」：门面该收，HUD 该亮。
     fn mcl_booted();
     /// 往页面和 console 里写一句话（启动阶段、panic 原因都走这里）。
@@ -305,6 +308,17 @@ mod bridge {
         #[cfg(not(target_arch = "wasm32"))]
         0
     }
+
+    /// 「物品栏」面板发来的命令：取走一条，队列空了返回 0（非 wasm 永远是 0）。
+    #[inline]
+    pub fn take_ui_cmd() -> i32 {
+        #[cfg(target_arch = "wasm32")]
+        {
+            unsafe { mcl_take_ui_cmd() }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -486,7 +500,13 @@ enum Phase {
 struct Game {
     world: World,
     player: Player,
-    selected: usize,
+    /// 背包 + 快捷栏 + 手里第几格。创造模式不计数，格子只记住"手里是哪种方块"。
+    inv: inv::Inv,
+    /// true = 创造（随便挖随便放，物品栏里显示 ∞）；false = 生存（挖了进背包、放下扣一个、
+    /// 工作台放地上、站旁边才解锁高阶配方）。
+    creative: bool,
+    /// 「物品栏」面板开着：不许挖、不许放、不许走。
+    paused: bool,
     time_of_day: f32,
     phase: Phase,
     chunks: Vec<Option<Mesh>>,
@@ -517,7 +537,9 @@ impl Game {
         Game {
             world,
             player: Player::new(spawn),
-            selected: 0,
+            inv: inv::Inv::new_creative(),
+            creative: true,
+            paused: false,
             time_of_day: 0.12,
             phase: Phase::Waiting,
             // Mesh 没有 Clone，所以不能用 vec![None; n]
@@ -608,12 +630,23 @@ impl Game {
         if y <= 0 {
             return; // 第 0 层是世界底壳，挖穿就掉出去了
         }
+        let id = self.world.get(x, y, z);
         self.world.set(x, y, z, b::AIR);
         self.save_dirty = true;
+        // 生存才掉料。创造挖了就是挖了，背包里那些格子永远是 0 个。
+        if !self.creative && self.inv.add(id, 1) > 0 {
+            self.set_note("背包满了，掉出来的没接住", NOTE_SECONDS);
+        }
     }
 
     /// 在瞄准到的面上放一个当前选中的方块。
     fn place(&mut self) {
+        if !self.inv.can_place(self.creative) {
+            if !self.creative {
+                self.set_note("手里这种方块用完了，去物品栏换一格", NOTE_SECONDS);
+            }
+            return;
+        }
         let eye = self.player.eye();
         let dir = self.player.look_dir();
         let Some(hit) = ray::cast(&self.world, eye, dir, REACH) else {
@@ -634,8 +667,10 @@ impl Game {
         if self.player.overlaps_cell(cell) {
             return; // 别把自己砌进墙里
         }
-        self.world
-            .set(cell[0], cell[1], cell[2], b::HOTBAR[self.selected]);
+        let Some(id) = self.inv.consume_selected(self.creative) else {
+            return; // can_place 上头已经说过了，这儿只是兜底
+        };
+        self.world.set(cell[0], cell[1], cell[2], id);
         self.save_dirty = true;
     }
 
@@ -646,8 +681,126 @@ impl Game {
         Some((hit.cell, hit.normal))
     }
 
+    /// 玩家附近（水平 4 格、上下 2 格）有没有工作台：站旁边才解锁高阶配方。
+    fn bench_near(&self) -> bool {
+        let p = self.player.pos;
+        let px = p[0].floor() as i32;
+        let py = p[1].floor() as i32;
+        let pz = p[2].floor() as i32;
+        for dx in -4..=4 {
+            for dz in -4..=4 {
+                for dy in -2..=2 {
+                    let (x, y, z) = (px + dx, py + dy, pz + dz);
+                    if world::in_bounds(x, y, z) && self.world.get(x, y, z) == b::WORKBENCH {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// 存档里带的背包段：模式(1) + 选中格(1) + 每格 (方块, 数量小端) = 定长 110 字节。
+    fn inv_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(2 + inv::SLOTS * 3);
+        v.push(if self.creative { 1 } else { 0 });
+        v.push(self.inv.selected_index() as u8);
+        for s in self.inv.slots.iter() {
+            v.push(s.id);
+            v.extend_from_slice(&s.n.to_le_bytes());
+        }
+        v
+    }
+
+    /// 读回来的背包段。长度不对、方块 id 不认识、数量超标，一律当没有（保住开局那套），
+    /// 宁可丢背包也别把一个能读的存档搞成读不了。
+    fn load_inv(&mut self, bytes: &[u8]) -> bool {
+        const LEN: usize = 2 + inv::SLOTS * 3;
+        if bytes.len() != LEN || bytes[1] as usize >= inv::HOTBAR_SLOTS {
+            return false;
+        }
+        let creative = bytes[0] == 1;
+        let mut slots = [inv::EMPTY; inv::SLOTS];
+        for i in 0..inv::SLOTS {
+            let o = 2 + i * 3;
+            let id = bytes[o];
+            let n = u16::from_le_bytes([bytes[o + 1], bytes[o + 2]]);
+            if id > b::WORKBENCH || n > inv::STACK_MAX || (id == b::AIR && n != 0) {
+                return false;
+            }
+            if id != b::AIR && n == 0 && !creative {
+                return false; // 生存里 0 个的格子该清成空气，留着是脏数据
+            }
+            slots[i] = inv::Slot { id, n };
+        }
+        self.inv = inv::Inv {
+            slots,
+            selected: bytes[1] as usize,
+        };
+        self.creative = creative;
+        true
+    }
+
+    /// 切创造 / 生存。切过去就把背包换成那个模式该有的一套：创造的数量永远是 0，
+    /// 混着带进生存就成了「手里有 0 个的方块」，看着跟 bug 一样。
+    fn toggle_creative(&mut self) {
+        self.creative = !self.creative;
+        self.inv = if self.creative {
+            inv::Inv::new_creative()
+        } else {
+            inv::Inv::new_survival()
+        };
+        self.save_dirty = true;
+        self.set_note(
+            if self.creative {
+                "切到创造：随便挖随便放"
+            } else {
+                "切到生存：挖了进背包，放下要扣"
+            },
+            NOTE_SECONDS,
+        );
+    }
+
+    /// 「物品栏」面板发来的命令。命令号那张表在 loader.js 里的 uiCmd() 注释上。
+    fn ui_cmd(&mut self, cmd: i32) {
+        match cmd {
+            1..=9 => {
+                self.inv.selected = (cmd - 1) as usize;
+            }
+            100..=126 => {
+                // 背包第 n 格 ↔ 手上那格（面板里点背包格）
+                self.inv.swap_with_selected(inv::HOTBAR_SLOTS + (cmd - 100) as usize);
+                self.save_dirty = true;
+            }
+            200..=299 => {
+                let bench = self.bench_near();
+                if let Some(r) = inv::RECIPES.get((cmd - 200) as usize) {
+                    if inv::craft(&mut self.inv, r, bench) {
+                        self.set_note(r.note, NOTE_SECONDS);
+                        self.save_dirty = true;
+                    } else {
+                        self.set_note("合不成：料不够，或者没站在工作台旁边", NOTE_SECONDS);
+                    }
+                }
+            }
+            300 => self.toggle_creative(),
+            400 => self.paused = true,
+            401 => self.paused = false,
+            6000..=7999 => {
+                // 自动化/调试用的给料：6000 + 方块 id * 100 + 数量。创造不计数量，忽略。
+                let raw = cmd - 6000;
+                let id = (raw / 100) as u8;
+                let n = (raw % 100) as u16;
+                if !self.creative && id <= b::WORKBENCH && n > 0 && self.inv.add(id, n) > 0 {
+                    self.set_note("背包满了，掉出来的没接住", NOTE_SECONDS);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn save_now(&mut self) {
-        let bytes = save::encode(&self.world);
+        let bytes = save::encode(&self.world, &self.inv_bytes());
         bridge::save_request(&bytes);
         self.save_dirty = false;
         self.save_timer = 0.0;
@@ -699,17 +852,26 @@ impl Game {
             self.player.yaw,
             self.player.pitch
         );
+        let sel = self.inv.selected_slot();
+        let held = if self.creative {
+            "∞".to_string()
+        } else {
+            format!("×{}", sel.n)
+        };
+        let mode = format!("{}·{}", mode, if self.creative { "创造" } else { "生存" });
         let text = format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}",
-            self.selected + 1,
-            b::block_name(b::HOTBAR[self.selected]),
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            self.inv.selected_index() + 1,
+            format!("{} {}", b::block_name(sel.id), held),
             mode,
             clock_text(self.time_of_day),
             self.world.changed,
             fps,
             state,
             note,
-            pos
+            pos,
+            // 第 10 段：物品栏面板要的整份数据（里面一个 | 都没有，管子按 | 切段）
+            inv::inv_text(&self.inv, self.creative, self.bench_near())
         );
         bridge::hud(&text);
     }
@@ -773,8 +935,12 @@ fn read_mouse(g: &mut Game, dt: f32) {
             } else if is_mouse_button_released(MouseButton::Middle) {
                 if let Some((cell, _)) = g.pick_target() {
                     let id = g.world.get(cell[0], cell[1], cell[2]);
-                    if let Some(i) = b::HOTBAR.iter().position(|&x| x == id) {
-                        g.selected = i;
+                    if let Some(i) = g.inv.find(id, g.creative) {
+                        if i < inv::HOTBAR_SLOTS {
+                            g.inv.selected = i;
+                        } else {
+                            g.inv.swap_with_selected(i);
+                        }
                     }
                 }
             } else {
@@ -786,15 +952,7 @@ fn read_mouse(g: &mut Game, dt: f32) {
     g.wheel_cd -= dt;
     let (_, dy) = mouse_wheel();
     if dy.abs() > 0.01 && g.wheel_cd <= 0.0 {
-        let n = b::HOTBAR.len() as i32;
-        let mut s = g.selected as i32 - dy.signum() as i32;
-        if s < 0 {
-            s += n;
-        }
-        if s >= n {
-            s -= n;
-        }
-        g.selected = s as usize;
+        g.inv.cycle_selected(-(dy.signum() as i32));
         g.wheel_cd = 0.12;
     }
 }
@@ -981,7 +1139,7 @@ fn apply_loaded_save(game: &mut Game) {
         Ok(Some(bytes)) => bytes,
     };
     match save::decode(&bytes) {
-        Ok((seed, raw)) => {
+        Ok((seed, raw, saved_inv)) => {
             let Some(w) = World::from_raw(seed, raw) else {
                 // 长度对不上等：世界建不起来，和坏档一样得按种子重来并覆盖掉它
                 game.world = World::new(SEED);
@@ -992,6 +1150,13 @@ fn apply_loaded_save(game: &mut Game) {
             };
             game.world = w;
             game.player = Player::new(game.world.spawn());
+            // v2 才有的背包段。老档（v1）没有这段，照旧用创造那套；有段但不合格也给开局那套。
+            if let Some(saved) = saved_inv {
+                if !game.load_inv(&saved) {
+                    game.inv = inv::Inv::new_creative();
+                    game.creative = true;
+                }
+            }
             // 拿到旧存档就不再自动存一份，除非读者真的改动过
         }
         Err(_) => {
@@ -1093,10 +1258,28 @@ async fn main() {
             let btn_fly = bridge::take_fly() != 0;
             let btn_slot = bridge::take_slot();
 
-            read_mouse(&mut game, dt);
-            let mut wish = wish_from_keys(&game.player);
-            if let Some(w) = read_touch(&mut game, dt) {
-                wish = w;
+            // 「物品栏」面板发来的命令，一条一条吃到底（0 = 队列空）。
+            loop {
+                let cmd = bridge::take_ui_cmd();
+                if cmd == 0 {
+                    break;
+                }
+                game.ui_cmd(cmd);
+            }
+
+            // 面板开着：不许挖、不许放、不许走（手机上面板挡着屏，电脑上怕你边看边跑）
+            if !game.paused {
+                read_mouse(&mut game, dt);
+            }
+            let mut wish = if game.paused {
+                [0.0f32; 3]
+            } else {
+                wish_from_keys(&game.player)
+            };
+            if !game.paused {
+                if let Some(w) = read_touch(&mut game, dt) {
+                    wish = w;
+                }
             }
 
             for (i, key) in [
@@ -1111,23 +1294,27 @@ async fn main() {
                 (8, KeyCode::Key9),
             ] {
                 if is_key_pressed(key) {
-                    game.selected = i;
+                    game.inv.selected = i;
                 }
             }
 
             // slot 是有符号增量（+1 下一个 / -1 上一个）：rem_euclid 让两头都能绕回栏里。
             if btn_slot != 0 {
-                let n = b::HOTBAR.len() as i32;
-                game.selected = (game.selected as i32 + btn_slot).rem_euclid(n) as usize;
+                game.inv.cycle_selected(btn_slot);
             }
 
-            if is_key_pressed(KeyCode::F) || btn_fly {
+            // G：切创造 / 生存（物品栏里那个按钮走的是同一条命令 300）
+            if is_key_pressed(KeyCode::G) && !game.paused {
+                game.toggle_creative();
+            }
+
+            if (is_key_pressed(KeyCode::F) || btn_fly) && !game.paused {
                 game.player.fly = !game.player.fly;
                 game.player.vel[1] = 0.0;
             }
 
             // 手机端没有键盘，跳全靠那排 DOM 按钮（触屏双击也能切飞行，见 read_touch）
-            let jump = is_key_down(KeyCode::Space) || btn_jump;
+            let jump = (is_key_down(KeyCode::Space) || btn_jump) && !game.paused;
             let down_key = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
             // 行走时 Shift 是加速，飞行时 Shift 是下降，两者不能同时生效。
             let sprint = down_key && !game.player.fly;

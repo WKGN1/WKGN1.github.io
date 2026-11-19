@@ -485,6 +485,15 @@ function registerBridge() {
         return n;
       };
 
+      // 「物品栏」面板的命令队列：页面塞一条，Rust 每帧 take 走一条，取走即清。
+      // 命令号：1..9 选快捷格 / 100+n 背包第 n 格跟手上对调 / 200+k 合第 k 条配方 /
+      // 300 切创造生存 / 400 面板开（暂停）/ 401 面板关 / 6000+方块id*100+数量 给料（自动化用）。
+      env.mcl_take_ui_cmd = function () {
+        if (!uiQueue.length) return 0;
+        var c = uiQueue.shift();
+        return c | 0;
+      };
+
       // 手机玩家跳 / 飞 / 换方块：DOM 按钮被点过时返回 1（slot 返回有符号增量，+1 下一个
       // / -1 上一个），取走即清。Rust 每帧调一次。
       env.mcl_take_jump = function () {
@@ -746,6 +755,134 @@ function showFallback(msg) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 物品栏：数据走 HUD 的第 10 段（Rust 推的，形状见 inv.rs 的 inv_text），
+// 操作走命令队列（uiCmd）。这边只管画和点，规则全在 Rust 那边。
+var uiQueue = [];
+var invOpen = false;
+var invText = '';
+
+function uiCmd(c) {
+  uiQueue.push(c | 0);
+  if (uiQueue.length > 64) uiQueue.splice(0, uiQueue.length - 64);   // 卡住时别越堆越多
+}
+
+// 方块的格子颜色：从图集那套色里挑的代表色，纯粹是给面板看的，不参与渲染。
+var BLOCK_COLOR = {
+  1: '#68963e', 2: '#7a5637', 3: '#88888f', 4: '#d9cf9a', 5: '#386cb0', 6: '#6b4a2b',
+  7: '#b58a4e', 8: '#4a782c', 9: '#e8eef6', 10: '#d6a842', 11: '#7a9a4e', 12: '#a8804a'
+};
+
+// 「C:1;B:0;S:2;N:1-草方块,...;H:1:8,...;G:...;R:7:4>6:1,...;A:1,0,...」 -> {C:'1',N:'...',...}
+function parseInv(t) {
+  var f = {};
+  var parts = String(t).split(';');
+  for (var i = 0; i < parts.length; i++) {
+    var k = parts[i].charAt(0);
+    f[k] = parts[i].slice(2);
+  }
+  return f;
+}
+
+function invNames(f) {
+  var m = {};
+  var items = String(f.N || '').split(',');
+  for (var i = 0; i < items.length; i++) {
+    var o = items[i].indexOf('-');
+    if (o > 0) m[items[i].slice(0, o)] = items[i].slice(o + 1);
+  }
+  return m;
+}
+
+function invCells(f, names, key, from, to, sel, creative) {
+  var out = '';
+  var slots = String(f[key] || '').split(',');
+  var base = key === 'H' ? 0 : 9;   // 背包那一段自己是 0 起数的，格子的全局下标要加回来
+  for (var i = from; i < to; i++) {
+    var pair = String(slots[i - base] || '0:0').split(':');
+    var id = pair[0] | 0;
+    var n = pair[1] | 0;
+    var empty = id === 0 || (!creative && n === 0);
+    var cmd = key === 'H' ? (i + 1) : (100 + (i - 9));
+    out += '<button class="g-inv-cell" type="button" data-cmd="' + cmd + '" title="' +
+      (empty ? '空着' : names[id] + ' ×' + n) + '"' +
+      (empty ? ' data-empty="1"' : '') +
+      (key === 'H' && i === sel ? ' data-sel="1"' : '') + '>' +
+      (empty ? '' : '<span class="g-inv-chip" style="background:' + (BLOCK_COLOR[id] || '#999') + '"></span>') +
+      '<span class="g-inv-name">' + (empty ? '' : (names[id] || '')) + '</span>' +
+      '<span class="g-inv-n">' + (empty ? '' : (creative ? '∞' : n)) + '</span></button>';
+  }
+  return out;
+}
+
+function invRecipes(f, names) {
+  var recs = String(f.R || '').split(',');
+  var can = String(f.A || '').split(',');
+  var out = '';
+  for (var i = 0; i < recs.length; i++) {
+    if (!recs[i]) continue;
+    var arrow = recs[i].indexOf('>');
+    var lhs = recs[i].slice(0, arrow).split(':');
+    var outId = lhs[0] | 0, outN = lhs[1] | 0;
+    var needTxt = recs[i].slice(arrow + 1).replace('*', '');
+    var bench = recs[i].indexOf('*') >= 0;
+    var parts = needTxt.split('+');
+    var need = [];
+    for (var j = 0; j < parts.length; j++) {
+      var kv = parts[j].split(':');
+      need.push((names[kv[0] | 0] || kv[0]) + ' ×' + (kv[1] | 0));
+    }
+    var ok = can[i] === '1';
+    out += '<div class="g-inv-rec"><span class="g-inv-rec-text">' +
+      '<span class="g-inv-need">' + need.join(' + ') + '</span> → ' +
+      '<span class="g-inv-out">' + (names[outId] || outId) + ' ×' + outN + '</span>' +
+      (bench ? ' <span class="g-inv-tag" data-on="' + (f.B === '1' ? '1' : '0') + '">' +
+        (f.B === '1' ? '有工作台' : '需工作台') + '</span>' : '') +
+      '</span><button class="g-inv-btn" type="button" data-cmd="' + (200 + i) + '"' +
+      (ok ? '' : ' disabled') + '>合成</button></div>';
+  }
+  return out;
+}
+
+function renderInv() {
+  var body = $('inv-body');
+  if (!body) return;
+  var f = parseInv(invText);
+  var names = invNames(f);
+  var creative = f.C === '1';
+  var sel = (f.S | 0) - 1;
+  var html = '<div class="g-inv-sec">手上（数字键 1-9 对应这排）</div><div class="g-inv-grid">' +
+    invCells(f, names, 'H', 0, 9, sel, creative) + '</div>' +
+    '<div class="g-inv-sec">背包</div><div class="g-inv-grid">' +
+    invCells(f, names, 'G', 9, 36, sel, creative) + '</div>' +
+    '<div class="g-inv-sec">合成' + (creative ? '（创造模式不看数量，合不成）' : '') + '</div>' +
+    invRecipes(f, names);
+  if (body.innerHTML !== html) body.innerHTML = html;   // 没变就别重写，免得白刷一遍布局
+  var mb = $('inv-mode');
+  if (mb) mb.textContent = creative ? '改成生存' : '改成创造';
+  var tb = $('inv-bench');
+  if (tb) {
+    tb.textContent = f.B === '1' ? '旁边有工作台' : '旁边没工作台';
+    tb.setAttribute('data-on', f.B === '1' ? '1' : '0');
+  }
+}
+
+function setInv(open) {
+  invOpen = !!open;
+  var el = $('inv');
+  if (el) el.hidden = !invOpen;
+  uiCmd(invOpen ? 400 : 401);
+  if (invOpen) renderInv();
+  var c = $('glcanvas');
+  if (c && c.focus) { try { c.focus(); } catch (e) {} }
+}
+
+function toggleInv() { setInv(!invOpen); }
+
+// 自动化 / 调试用的给料：切到生存之后 __MCL_GIVE(3, 5) = 给 5 个石头
+window.__MCL_GIVE = function (id, n) { uiCmd(6000 + ((id | 0) * 100) + (n | 0)); return 1; };
+window.__MCL_INV_OPEN = function (on) { setInv(!!on); return invOpen ? 1 : 0; };
+
 var HUD_IDS = ['hud-slot', 'hud-block', 'hud-mode', 'hud-clock', 'hud-changed', 'hud-fps', 'hud-save', 'hud-note'];
 var hudLast = {};
 
@@ -764,6 +901,12 @@ function tickHud() {
     if (!el) continue;
     if (el.textContent !== v) el.textContent = v;
     if (id === 'hud-note') el.hidden = (v === ''); // 备注平时是空的，别挂个空块在画面上
+  }
+  // 第 10 段是物品栏的数据。面板开着才画，关着只留一份最新的等点开用。
+  var it = parts[9];
+  if (it != null && it !== invText) {
+    invText = String(it);
+    if (invOpen) renderInv();
   }
 }
 
@@ -1257,8 +1400,37 @@ function wireButtons() {
   // 手机端入口：HUD 上的小按钮置标志，Rust 每帧 take 走（取走即清）
   wireHudTap('btn-jump', function () { wantJump = true; });
   wireHudTap('btn-fly', function () { wantFly = true; });
-  wireHudTap('btn-slot-prev', function () { wantSlot -= 1; });
-  wireHudTap('btn-slot-next', function () { wantSlot += 1; });
+  wireHudTap('btn-inv', function () { toggleInv(); });
+
+  // 面板里的点法：格子带 data-cmd，一个委托监听全接住（每 0.2 秒可能整块重画，
+  // 一个个挂监听会越挂越多）。
+  var invEl = $('inv');
+  if (invEl && invEl.addEventListener) {
+    invEl.addEventListener('click', function (ev) {
+      var t = ev.target;
+      while (t && t !== invEl) {
+        if (t.getAttribute) {
+          var c = t.getAttribute('data-cmd');
+          if (c != null) { uiCmd(parseInt(c, 10) | 0); renderInv(); return; }
+          if (t.id === 'inv-close' || t === $('inv-back')) { setInv(false); return; }
+          if (t.id === 'inv-mode') { uiCmd(300); renderInv(); return; }
+        }
+        t = t.parentNode;
+      }
+    }, false);
+  }
+
+  // 电脑上：E 开关物品栏，Esc 也关（跟真全屏那条不冲突——全屏时 Esc 先解指针锁定）
+  if (window.addEventListener) {
+    try {
+      window.addEventListener('keydown', function (ev) {
+        var k = ev && ev.key ? String(ev.key).toLowerCase() : '';
+        var code = ev && ev.keyCode ? ev.keyCode : 0;
+        if (k === 'e' || code === 69) { toggleInv(); return; }
+        if (invOpen && (k === 'escape' || code === 27)) setInv(false);
+      }, false);
+    } catch (e) {}
+  }
 
   // 点过 HUD 上的按钮之后焦点会留在按钮上，键盘（WASD）就又哑了；把焦点还给画布
   var c = $('glcanvas');
