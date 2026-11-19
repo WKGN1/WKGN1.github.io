@@ -493,6 +493,16 @@ https://res.sparklight.cn/prod%2F3642f204-cbe1-44a4-b85c-1d1567f4faca%2Fbeb5bf42
 
 去掉贴图之后内联代码合计还是 **39,544,655 字符** —— 大头不是算法，是塞在 HTML 里的方块/物品表、模型定义、MC 那套噪声配置数据。想抄的是前面那三块，不是那 3900 万字符。
 
+这三块已经发到站点上了（`static/files/` 原样进 `dist/files/`，`build.py` 搬的），链接好转给下一个会话，也免得依赖那个签名地址：
+
+- `https://wkgn1.github.io/files/opusmc-shaders.txt` —— 全部 13 个着色器，23,100 字节
+- `https://wkgn1.github.io/files/opusmc-renderer.txt` —— 渲染那块，134,224 字节
+- `https://wkgn1.github.io/files/opusmc-world-light.txt` —— 世界生成 + 光照 + 网格化，278,510 字节
+
+文件名特意用 ASCII（中文文件名会变成一长串百分号转义，手机上难看也难转述）。每份开头都写了出处 + 「只放代码、只作个人学习」那句。**6,325,444 字节那份全文去贴图压缩包暂时只在硬盘上，没上站**（等他点头）。
+
+**这条得记住**：`send_to_wechat` 发**非图片文件会被微信拒**（`.js`、`.txt` 都是 `ret=-2 / errmsg=prepare failed`，图片一直是好的）。所以「把文件发给他」这条在这个渠道上要走**站上链接**，不是附件。
+
 **体量对比**（这条得记住，别被"效果差距"唬住）：它光一个叫「WebGL2 renderer」的 script 块就 **133,393 字符 / 3,183 行 / 189 个顶层定义**；贴图是把 **1587 张 PNG 以 base64 塞进 HTML**（合计 13,353,212 字符）；两个模组是另外的 bundle.js；地形用的是 MC 那套噪声配置数据（aquifer / find_top_surface 等，也是塞在 HTML 里的 JSON）。我们是 **3,933 行 Rust + 2,479 行前端**，wasm 553,313 字节（gzip 186,054）。差两个数量级，**但它手机优先的思路跟我们是一条路上的**，所以能抄的东西不少。
 
 **它凭什么好看**（按"我们能抄的程度"排）：
