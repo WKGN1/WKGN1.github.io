@@ -396,7 +396,24 @@ GitHub runner 在 UTC，`build.py` 原来用 `date.today()`。北京时间早上
 ### 现在的实测数字（2026-11-19 早，本机）
 
 - wasm 本体 528,866 字节，gzip 178,040 字节。开跑到 HUD 亮 7–10 秒。HUD 帧率 60–61；30 次采样的浸泡测试后段没有一个低于 30，全程零报错、零截断警告。
-- 自动化 **95 条断言：0 失败、3 条不作数**（不作数那三条就是无头报不出触屏能力）。七组：桌面基础 / 静态 / 无 WebGL / 看门狗 / 门面 / 手机触摸 / 浸泡。
+- 自动化 **104 条断言：0 失败、3 条不作数**（不作数那三条就是无头报不出触屏能力）。七组：桌面基础 / 静态 / 无 WebGL / 看门狗 / 门面 / 手机触摸 / 浸泡。全屏那轮加了 9 条：静态 4 条（按钮在、走 API + orientation.lock、iOS 退回 CSS 横屏、坐标换算写在原型上），手机触摸里 5 条（画布真变横的 + 换算装上、屏幕往下拖=yaw 减而 pitch 不动、屏幕往右拖=pitch 加而 yaw 不动、退出恢复竖屏、真按钮走「全屏被拒 → 退回横屏」那条分支）。
 - Rust 单元测试 28 条全过（`cd game && cargo test`，本地目标就够，不用 wasm）。这轮新加 2 条方向判据（见上一小节：屏幕右由渲染矩阵定、往右拖必须减 yaw）。
 - 方向这轮的实测数字，写在这里省得下次再算：桌面光标右移 128 像素 → yaw 0.600 → 0.026，变了 **−0.574**，和 128·(π/700)=0.5749 对得上；再把光标挪回原地，yaw 差 **0.000**。按 S 1.5 秒：沿视线 −6.75、沿屏幕右 −0.00；按 D：沿视线 −0.16、沿屏幕右 **+6.56**；按 A：沿屏幕右 **−5.69**；三次 yaw 变化都是 0.0000（键盘不转向）。手机右半屏往右拖 150 像素 → yaw 变了 **−1.122**（=150·π/420），往上拖 150 → pitch **+1.122**，再往下拖 300 → pitch **−1.122**（抵着夹紧为止）。
 - **回归脚本进仓库了：`game/regress.py`**（原来只躺在 `/tmp`，重启就没）。`python3 game/regress.py` 全跑，`python3 game/regress.py base touch` 只跑两组；测的是 `dist/`，所以要先 `bash game/build-wasm.sh && python3 build.py`。它 import 仓库根的 `wdshot.py`，geckodriver 用 `WDDRIVER=http://127.0.0.1:4455` 指过去。老的 `gamecheck.py` 留着（只做"能不能跑能不能挖"，一分钟出头，适合改完快速看一眼）。
+
+### 这轮（11-19 上午）：全屏 / 横屏
+
+他要的是「电脑手机都能全屏，手机上全屏是横屏」。`loader.js` 里 `enterFullscreen()` 按引擎给不给 API 走三条路：
+
+1. **有元素全屏 API 的**（桌面 Chrome/Edge/Firefox、安卓 Chrome、平板 Safari）：整页 `document.documentElement.requestFullscreen()`，进了 `fullscreenchange` 再 `screen.orientation.lock('landscape')` —— 安卓上这一句就横屏了，桌面浏览器不认这句、自己忽略（`catch` 掉，别让它冒错）。退出：再点按钮，或者浏览器自己的 Esc。
+2. **没有元素全屏的**（iPhone Safari、微信 iOS 内核 —— 只给视频）：退回 **CSS 横屏**：整页按「视口宽高对调」摆好再转 90°（`width=innerHeight`、`height=innerWidth`、`left=innerWidth`、`transform-origin:0 0` + `rotate(90deg)`；宽高在 JS 里按**像素**写死，vh/vw 在 iOS 上算不准，工具条一收就变）。看着就是横屏，手机横过来拿就行。Esc 或再点一次退出。
+3. 两个都不给（个别 WebView）：按下去什么也不变，不装模作样。
+
+**横屏模式的输入坐标必须换算，不换算方向就是错的。** 胶水算输入用的是 `clientX/clientY` 减画布的 `getBoundingClientRect()`（`mq_js_bundle.js` 里的 `mouse_relative_position`），画布被 CSS 转 90° 之后这套坐标对不上。CSS `rotate(90deg)` 把局部 `(x,y)` 画到屏幕上是 `(-y, x)`，反解是 `x = 屏幕y − 中心y`、`y = 中心x − 屏幕x`，再加回画布没转时的左上角（没转时的宽 = 转后的 bounding 高，没转时的高 = 转后的 bounding 宽）—— 就是 `loader.js` 里的 `unrotate()`。
+
+**坑：往事件对象上盖 getter 不顶用。** 第一版是在 window 捕获相给事件对象 `Object.defineProperty(ev,'clientX',{get:…})`。实测：横屏里拖一下**视角一点不动、人倒是往后走了** —— 胶水在我们读到之前就把原始屏幕坐标取走了，而那串坐标对 658 宽的画布落在 **0..329**，也就是左半屏，走的是摇杆那条。改成改 **`MouseEvent.prototype` / `Touch.prototype` 上的 getter**（`fixInputCoords()`：进横屏时装上、退出时把原描述符装回去），就跟监听注册的先后无关了，谁读都是换算过的；`PointerEvent.prototype` 继承 `MouseEvent.prototype`、自己没有 `clientX`，所以改 `MouseEvent` 就够。装没装上留了个 `window.__MCL_ROT_PATCH` 给测试和排查看。
+判据是硬的：换算对了，屏幕上「往下拖」= 画面里往右（yaw 该减）、屏幕上「往右拖」= 画面里往上抬（pitch 该加）；换算反了这两条正好反过来。
+
+自动化留了两个便利钩子：`window.__MCL_SET_ROTATE(1/0)` 直接开关横屏（无头浏览器没有用户手势走不到真全屏，这个钩子保证坐标换算那条路每轮都被测到）；无头里点真按钮会被 `requestFullscreen` 的用户手势要求拒掉，正好把「全屏失败 → 自动退回横屏」这条分支也验上了。
+
+**`check-es.py` 的假失败**：它用 npx 拉 acorn，网络不通时报「acorn 超时」并把那几处**判成超标**（实测一次 FAIL 1/5、紧接着重跑 PASS）。真要判 ES5 看 `game/regress.py` 静态场景里那条不依赖网络的：去掉注释和字符串之后找 `=>`、`const`、`let`、反引号、`??`、`?.`、`class`。

@@ -546,3 +546,20 @@ body {
     transition: none;
   }
 }
+
+/* 横屏模式：iOS 这类引擎没有元素全屏 API（只有视频有），全屏请求根本不可用，
+   所以退一步——把整个页面按「视口宽高对调」摆好再转 90°，看着就是横屏。
+   宽高用 JS 按像素写死（vh/vw 在 iOS 上算不准，工具条一收就变），这里只管旋转、
+   别再出滚动条、以及把 body 钉住免得被橡皮筋滚动带着跑。
+   输入坐标由 loader.js 换算回胶水认的那一套（胶水读的是 clientX/clientY 减画布的
+   getBoundingClientRect，见 mq_js_bundle.js 里的 mouse_relative_position）。 */
+body.g-rot {
+  position: fixed;
+  left: 0;
+  top: 0;
+  margin: 0;
+  overflow: hidden;
+  transform: rotate(90deg);
+  transform-origin: 0 0;
+}
+body.g-rot .g-stage { min-height: 0; }

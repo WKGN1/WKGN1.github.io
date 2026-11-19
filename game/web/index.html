@@ -24,6 +24,7 @@
       <a class="g-back" href="/">← 回站点</a>
       <div class="g-title">方块彩蛋 <b>MCL1</b></div>
       <div class="g-tools">
+        <button id="btn-full" class="g-btn" type="button">全屏</button>
         <button id="btn-export" class="g-btn" type="button" disabled>导出存档</button>
         <button id="btn-import" class="g-btn" type="button" disabled>导入</button>
         <button id="btn-reset" class="g-btn" type="button" disabled>清档重开</button>
@@ -64,10 +65,10 @@
             <!-- Rust 推的第 8 段：飞行提示之类。空的时候这边会把它收掉，别挂个空块 -->
             <div class="g-hud-note" id="hud-note">正在读本地 IndexedDB</div>
             <div class="g-hint" id="hint-desktop">
-              W前进 S后退 A左 D右 · 移动鼠标转向 · 左键挖 · 右键放 · 1-9 换方块 · F 飞行 · Shift 加速 · 空格 跳
+              W前进 S后退 A左 D右 · 移动鼠标转向 · 左键挖 · 右键放 · 1-9 换方块 · F 飞行 · Shift 加速 · 空格 跳 · 全屏
             </div>
             <div class="g-hint" id="hint-touch" hidden>
-              左半屏拖=走 · 右半屏拖=转向（跟手指同向） · 点一下=挖 · 按住=放 · 双击=飞行 · 跳/飞/换方块用上面那排按钮
+              左半屏拖=走 · 右半屏拖=转向（跟手指同向） · 点一下=挖 · 按住=放 · 双击=飞行 · 跳/飞/换方块用上面那排按钮 · 全屏（自动横屏）
             </div>
           </div>
         </div>

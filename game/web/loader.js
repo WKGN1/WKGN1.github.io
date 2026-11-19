@@ -885,7 +885,7 @@ function pushLook(ev) {
     dx = ev.movementX;
     dy = ev.movementY;
   } else {
-    if (!lookLocked && !canvasHasCursor(ev)) { lookHaveLast = false; return; }
+    if (!lookLocked && !rotMode && !canvasHasCursor(ev)) { lookHaveLast = false; return; }
     if (!lookHaveLast) {
       lookLastX = ev.clientX; lookLastY = ev.clientY; lookHaveLast = true;
       return;
@@ -909,6 +909,173 @@ function requestLookLock() {
   if (!c || !c.requestPointerLock) return;
   try { c.requestPointerLock(); } catch (e) {}
 }
+
+// ---------------------------------------------------------------------------
+// 全屏 / 横屏：按引擎给不给 API 走三条路。
+//   1) 有元素全屏 API（桌面 Chrome/Edge/Firefox、安卓 Chrome、平板 Safari）：整页 requestFullscreen，
+//      进去以后 screen.orientation.lock('landscape') —— 安卓上这就自动横屏，桌面自己会忽略这句。
+//   2) 压根没有元素全屏（iPhone 的 Safari、微信 iOS 内核只给视频）：退回 CSS 横屏，
+//      整页按「视口宽高对调」摆好再转 90°，看着就是横屏。
+//   3) 两个都不给（个别 WebView）：按钮按下去什么也不变，不装模作样。
+// 横屏模式下画布被 CSS 转了 90°，而胶水算输入用的是 clientX/clientY 减画布的
+// getBoundingClientRect（mq_js_bundle.js 里的 mouse_relative_position），所以在 window 的捕获相
+// 把坐标改写成「没转的时候胶水该看见的值」：CSS rotate(90deg) 把局部 (x,y) 画到屏幕上是 (−y, x)，
+// 反解就是 x = 屏幕y − 中心y、y = 中心x − 屏幕x，再加回画布没转时的左上角。
+// 换算装在 MouseEvent.prototype / Touch.prototype 的 getter 上（不是往事件对象上盖，那样胶水
+// 在我们读之前就取走原始值了），所以后面所有读 clientX 的人 —— 胶水、pushLook、转交给画布的那
+// 份合成事件 —— 拿到的都是换算过的，不用每一处各修一遍。
+var rotMode = false, rotRect = null, rotBusy = false;
+
+function fsApi() {
+  var de = document.documentElement;
+  return de.requestFullscreen || de.webkitRequestFullscreen || de.webkitRequestFullScreen ||
+    de.msRequestFullscreen || null;
+}
+
+function fsElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement ||
+    document.msFullscreenElement || null;
+}
+
+function exitFs() {
+  var ex = document.exitFullscreen || document.webkitExitFullscreen ||
+    document.webkitCancelFullScreen || document.msExitFullscreen;
+  if (ex) { try { ex.call(document); } catch (e) {} }
+}
+
+function lockLandscape(on) {
+  try {
+    var so = window.screen && window.screen.orientation;
+    if (!so) return;
+    if (on && typeof so.lock === 'function') {
+      var p = so.lock('landscape');
+      if (p && typeof p['catch'] === 'function') p['catch'](function () {});   // 桌面不认，忽略
+    } else if (!on && typeof so.unlock === 'function') {
+      so.unlock();
+    }
+  } catch (e) {}
+}
+
+function refreshRotRect() {
+  try { rotRect = $('glcanvas').getBoundingClientRect(); } catch (e) { rotRect = null; }
+}
+
+// 屏幕坐标 → 画布没转时胶水该看到的坐标
+function unrotate(cx, cy) {
+  var rc = rotRect;
+  if (!rc || !(rc.width > 0) || !(rc.height > 0)) return [cx, cy];
+  var cxm = rc.left + rc.width / 2, cym = rc.top + rc.height / 2;
+  // 没转时画布宽 = 转了之后的 bounding 高，没转时画布高 = 转了之后的 bounding 宽
+  return [rc.left + (cy - cym) + rc.height / 2, rc.top + (cxm - cx) + rc.width / 2];
+}
+
+// 改原型上的 getter，不是改事件对象：事件对象上盖一层 getter 实测不顶用 —— 胶水在我们之前
+// 就读走了原始屏幕坐标（现象是横屏里拖一下人往后走、视角一点不动，因为那串坐标落进了左半屏
+// 的摇杆）。原型上改一次，谁什么时候读都是换算过的，跟监听注册先后没关系。
+// PointerEvent.prototype 继承 MouseEvent.prototype，没有自己的 clientX，改 MouseEvent 就够。
+var inputPatch = null;
+
+function fixInputCoords(on) {
+  if (on) {
+    if (inputPatch) return true;
+    var saved = [];
+    var hosts = [];
+    if (window.MouseEvent) hosts.push(window.MouseEvent.prototype);
+    if (window.Touch) hosts.push(window.Touch.prototype);
+    for (var i = 0; i < hosts.length; i++) {
+      var h = hosts[i];
+      try {
+        var dx = Object.getOwnPropertyDescriptor(h, 'clientX');
+        var dy = Object.getOwnPropertyDescriptor(h, 'clientY');
+        if (!dx || typeof dx.get !== 'function' || !dx.configurable) continue;
+        if (!dy || typeof dy.get !== 'function' || !dy.configurable) continue;
+        var gx = dx.get, gy = dy.get;
+        Object.defineProperty(h, 'clientX', {
+          get: (function (gx, gy) {
+            return function () { return unrotate(gx.call(this), gy.call(this))[0]; };
+          })(gx, gy),
+          configurable: true, enumerable: dx.enumerable
+        });
+        Object.defineProperty(h, 'clientY', {
+          get: (function (gx, gy) {
+            return function () { return unrotate(gx.call(this), gy.call(this))[1]; };
+          })(gx, gy),
+          configurable: true, enumerable: dy.enumerable
+        });
+        saved.push([h, 'clientX', dx]);
+        saved.push([h, 'clientY', dy]);
+      } catch (e) {}
+    }
+    inputPatch = saved.length ? saved : false;
+    window.__MCL_ROT_PATCH = saved.length ? 1 : 0;      // 装没装上，测试和排查都看这个
+    return !!saved.length;
+  }
+  if (inputPatch) {
+    for (var k = 0; k < inputPatch.length; k++) {
+      var s = inputPatch[k];
+      try { Object.defineProperty(s[0], s[1], s[2]); } catch (e) {}
+    }
+  }
+  inputPatch = null;
+  window.__MCL_ROT_PATCH = 0;
+  return false;
+}
+
+function fullLabel() {
+  var b = $('btn-full');
+  if (!b) return;
+  b.textContent = (fsElement() || rotMode) ? '退出全屏' : '全屏';
+}
+
+function applyRotate(on) {
+  var b = document.body;
+  if (!b) return;
+  rotMode = !!on;
+  fixInputCoords(rotMode);
+  if (rotMode) {
+    var vw = window.innerWidth, vh = window.innerHeight;   // 现在是竖着的
+    if (b.classList) b.classList.add('g-rot');
+    b.style.width = vh + 'px';        // 横屏的宽 = 竖屏的高（vh/vw 在 iOS 上算不准，直接量像素）
+    b.style.height = vw + 'px';
+    b.style.left = vw + 'px';         // 绕左上角转 90° 会整块跑到视口左边，挪回来正好铺满
+    b.style.top = '0px';
+  } else {
+    if (b.classList) b.classList.remove('g-rot');
+    b.style.width = ''; b.style.height = ''; b.style.left = ''; b.style.top = '';
+  }
+  refreshRotRect();
+  fireResize();
+  setTimeout(function () { refreshRotRect(); }, 120);   // 胶水改完画布尺寸，rect 才是新的
+  setTimeout(function () { fireResize(); refreshRotRect(); }, 500);
+  fullLabel();
+}
+
+function enterFullscreen() {
+  var req = fsApi();
+  if (req) {
+    try {
+      var p = req.call(document.documentElement);
+      if (p && typeof p.then === 'function') {
+        p.then(function () { lockLandscape(true); fullLabel(); },
+               function () { applyRotate(true); });
+      } else {
+        // 老引擎不给 promise：等 fullscreenchange，等不到就当不成，退回横屏
+        setTimeout(function () { if (!fsElement() && !rotMode) applyRotate(true); }, 800);
+      }
+      return;
+    } catch (e) { applyRotate(true); return; }
+  }
+  applyRotate(true);
+}
+
+function leaveFullscreen() {
+  if (fsElement()) { exitFs(); lockLandscape(false); }
+  if (rotMode) applyRotate(false);
+  fullLabel();
+}
+
+// 自动化用：无头浏览器里没有用户手势，走不到真全屏，这条直接开/关横屏模式好测坐标换算
+window.__MCL_SET_ROTATE = function (on) { applyRotate(!!on); return rotMode ? 1 : 0; };
 
 function watchBoot() {
   var timer = setInterval(function () {
@@ -1116,6 +1283,41 @@ function wireButtons() {
           if (lookFree && !lookLocked && ev.button === 0) requestLookLock();
         }, false);
       }
+    } catch (e) {}
+  }
+
+  // 全屏 / 横屏（见上面那一段）。坐标换算的监听挂在 window 的捕获相：这样比画布上的
+  // 处理更早，胶水读到的就已经是换算过的坐标了。
+  if (window.addEventListener) {
+    try {
+      var bf = $('btn-full');
+      if (bf && bf.addEventListener) {
+        bf.addEventListener('click', function (ev) {
+          try { if (ev && ev.preventDefault) ev.preventDefault(); } catch (e) {}
+          if (fsElement() || rotMode) leaveFullscreen(); else enterFullscreen();
+        }, false);
+      }
+      ['fullscreenchange', 'webkitfullscreenchange', 'msfullscreenchange'].forEach(function (kind) {
+        window.addEventListener(kind, function () {
+          if (fsElement()) lockLandscape(true); else lockLandscape(false);
+          fullLabel();
+        }, false);
+      });
+      // Esc：真全屏浏览器自己会退，横屏模式得我们自己退
+      window.addEventListener('keydown', function (ev) {
+        if (rotMode && (ev.key === 'Escape' || ev.keyCode === 27)) leaveFullscreen();
+      }, false);
+      // 转屏/工具条收起会改视口尺寸，横屏模式要按新尺寸重新摆一遍
+      window.addEventListener('resize', function () {
+        if (!rotMode || rotBusy) return;
+        rotBusy = true;
+        applyRotate(true);
+        setTimeout(function () { rotBusy = false; }, 250);
+      }, false);
+      window.addEventListener('orientationchange', function () {
+        if (!rotMode) return;
+        setTimeout(function () { if (rotMode) applyRotate(true); }, 300);
+      }, false);
     } catch (e) {}
   }
 

@@ -1011,6 +1011,65 @@ def scene_touch(u):
     time.sleep(0.8)
     log("手机端触摸", "点 HUD「飞」按钮会切飞行", "飞行" in hud_field(s, 2), "模式=%s" % hud_field(s, 2))
 
+    # ---- 横屏模式（iOS 那条路）：CSS 把整页转了 90°，输入坐标必须换算回胶水认的那一套 ----
+    # 判据够硬：换算对了，屏幕上「往下拖」在画面里才是往右（yaw 该减）、屏幕上「往右拖」在画面里
+    # 才是往上抬（pitch 该加）；换算反了，这两条会正好反过来。
+    s.ev("window.__MCL_SET_ROTATE(1);")
+    time.sleep(1.6)
+    box = s.ev("var c = document.getElementById('glcanvas');"
+               "return [c.clientWidth, c.clientHeight, String(document.body.className),"
+               "Number(window.__MCL_ROT_PATCH || 0)];")
+    log("手机端触摸", "开横屏：画面变成横的（画布宽 > 高），坐标换算装上了",
+        bool(box[0] > box[1] and box[3] == 1),
+        "画布 %d×%d，body class=%r，坐标换算装上=%d" % (box[0], box[1], box[2], box[3]))
+
+    def rot_drag(dx, dy):
+        """按**屏幕**方向拖：我们扮的是用户，手指只会照屏幕方向动，换算该由页面做。"""
+        W, H = s.ev("return [window.innerWidth, window.innerHeight];")
+        x0, y0 = W // 2, H // 2 + 45          # 屏幕中线偏下一点：换算过去正好落在画布右半屏
+        s.ev("window.__T.tstart(%d, %d, %d);" % (tid, x0, y0))
+        time.sleep(0.12)
+        for kk in range(1, 7):
+            s.ev("window.__T.tmove(%d, %d, %d);" % (tid, x0 + dx * kk // 6, y0 + dy * kk // 6))
+            time.sleep(0.09)
+        s.ev("window.__T.tend(%d, %d, %d);" % (tid, x0 + dx, y0 + dy))
+        time.sleep(0.5)
+        return tid + 1
+
+    p0 = pose(s)
+    tid = rot_drag(0, 150)                    # 屏幕往下拖
+    p1 = pose(s)
+    tid = rot_drag(150, 0)                    # 屏幕往右拖
+    p2 = pose(s)
+    if p0 and p1 and p2:
+        dyaw = ang(p1[3] - p0[3]); dpit = p1[4] - p0[4]
+        dyaw2 = ang(p2[3] - p1[3]); dpit2 = p2[4] - p1[4]
+        log("手机端触摸", "横屏里坐标换算对：屏幕上往下拖 = 画面里往右转",
+            dyaw < -0.1 and abs(dpit) < 0.35,
+            "屏幕往下拖 150：yaw 变 %.3f（该减 = 画面里往右转），pitch 只变 %.3f（不该动）" % (dyaw, dpit))
+        log("手机端触摸", "横屏里屏幕上往右拖 = 画面里往上抬",
+            dpit2 > 0.1 and abs(dyaw2) < 0.35,
+            "屏幕往右拖 150：pitch 变 %.3f（该加 = 抬），yaw 只变 %.3f（不该动）" % (dpit2, dyaw2))
+    else:
+        log("手机端触摸", "横屏里坐标换算对", None, "读不到位姿")
+
+    s.ev("window.__MCL_SET_ROTATE(0);")
+    time.sleep(1.3)
+    box = s.ev("var c = document.getElementById('glcanvas');"
+               "return [c.clientWidth, c.clientHeight, String(document.body.className)];")
+    log("手机端触摸", "关横屏：恢复原来的竖屏摆法", bool(box[0] <= box[1]) and "g-rot" not in box[2],
+        "画布 %d×%d，body class=%r" % (box[0], box[1], box[2]))
+
+    # 真按钮那条：无头浏览器没有用户手势，requestFullscreen 会被拒，正好走退回横屏那一条
+    s.ev("document.getElementById('btn-full').click();")
+    time.sleep(1.5)
+    lab = s.ev("return document.getElementById('btn-full').textContent;")
+    cls = s.ev("return String(document.body.className);")
+    log("手机端触摸", "顶栏「全屏」按下去真有反应（全屏被拒时自动退回横屏）",
+        "退出全屏" in str(lab) and "g-rot" in str(cls), "文案=%r class=%r" % (lab, cls))
+    s.ev("document.getElementById('btn-full').click();")
+    time.sleep(1.0)
+
     errs = s.ev("return window.__T.errs();")
     log("手机端触摸", "整条触摸流程没有报错（老内核 TouchList 不可迭代会刷错）", not errs, "｜".join(errs[:3])[:200])
     warn = s.ev("return window.__T.warns();")
@@ -1100,6 +1159,13 @@ def scene_static(u):
          bool(fimp) and "accept=" not in fimp.group(0) and "hidden" not in fimp.group(0)),
         ("blob 地址建不出来时有旁路（退回 manifest 给的原始 wasm 地址）", "objUrl || wasmUrl" in L),
         ("字体晚到/旋转后会补一次尺寸同步", "fonts.ready" in L or "fonts && document.fonts" in L),
+        ("顶栏有「全屏」按钮（电脑手机都能全屏）", "btn-full" in I and "全屏" in I),
+        ("全屏走 API：requestFullscreen + 安卓 orientation.lock('landscape')",
+         "requestFullscreen" in L and "orientation" in L and "lock('landscape')" in L),
+        ("没有全屏 API 的引擎（iOS）退回 CSS 横屏：整页转 90 度、宽高对调",
+         "applyRotate" in L and "g-rot" in C and "rotate(90deg)" in C),
+        ("横屏模式下输入坐标在 window 捕获相换算（胶水读的是 clientX 减画布 rect）",
+         "fixInput" in L and "unrotate" in L and "getBoundingClientRect" in L),
     ]
     for item in checks:
         log("静态检查", item[0], item[1], item[2] if len(item) > 2 else "")
