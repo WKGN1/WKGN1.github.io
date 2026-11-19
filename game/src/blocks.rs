@@ -42,6 +42,11 @@ pub const TILE_BENCH_TOP: u8 = 13;
 
 pub const TILE_PX: u32 = 16;
 pub const TILE_COUNT: u32 = 14;
+
+/// 水的动画帧数。图集里水**只占一格**（TILE_WATER），运行时把第 k 帧覆写进那一格：
+/// 不动网格、不重建 chunk、也不用给顶点加"第几帧"这一维（OpusMC 那边是靠纹理层号换帧，
+/// 我们没有纹理数组，覆写同一格是最省事的等价做法）。
+pub const WATER_FRAMES: usize = 3;
 pub const ATLAS_W: u32 = TILE_PX * TILE_COUNT; // 224
 pub const ATLAS_H: u32 = TILE_PX; // 16
 
@@ -261,14 +266,32 @@ fn paint_tile(tile: u8, x: u32, y: u32) -> [u8; 3] {
                 shade(base, 1.0 + j * 0.07)
             }
         }
-        TILE_WATER => {
-            // 横向波纹 + 细噪点：不动图仿动图，省下时间做多卡动画
-            let band = (((y as f32 + (x as f32 * 0.35)) * 1.1).sin() + 1.0) * 0.5;
-            let base = rgb(56, 108, 176);
-            shade(base, 0.90 + band * 0.22 + j * 0.05)
-        }
+        TILE_WATER => paint_water(x, y, 0),
         _ => rgb(200, 200, 200),
     }
+}
+
+/// 水的一帧。只有波纹的相位随 frame 走，**噪点抖动不动**：连噪点一起换帧就是一锅乱闪，
+/// 不像水在动，像电视没信号。
+fn paint_water(x: u32, y: u32, frame: usize) -> [u8; 3] {
+    let step = std::f32::consts::PI * 2.0 / WATER_FRAMES as f32;
+    let band = (((y as f32 + x as f32 * 0.35) * 1.1 + frame as f32 * step).sin() + 1.0) * 0.5;
+    let j = jitter(x, y, TILE_WATER as u32);
+    shade(rgb(56, 108, 176), 0.90 + band * 0.22 + j * 0.05)
+}
+
+/// 第 frame 帧水的 16×16 RGBA（1024 字节，alpha 一律 255：水在我们这儿是不透明的）。
+/// 运行时拿它覆写图集里 TILE_WATER 那一格。
+pub fn water_frame_rgba(frame: usize) -> Vec<u8> {
+    let f = frame % WATER_FRAMES;
+    let mut out = Vec::with_capacity((TILE_PX * TILE_PX * 4) as usize);
+    for y in 0..TILE_PX {
+        for x in 0..TILE_PX {
+            let c = paint_water(x, y, f);
+            out.extend_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+    }
+    out
 }
 
 /// 生成 RGBA 图集。水用的是它自己的 11 号贴片（TILE_WATER，波纹直接画在像素里），
@@ -293,6 +316,34 @@ pub fn atlas_rgba() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 水有三帧彼此不同而图集里那一格就是第零帧() {
+        let f0 = water_frame_rgba(0);
+        let f1 = water_frame_rgba(1);
+        let f2 = water_frame_rgba(2);
+        assert_eq!(f0.len(), (TILE_PX * TILE_PX * 4) as usize);
+        assert_eq!(f1.len(), f0.len());
+        assert_ne!(f0, f1, "两帧一模一样就没有动画");
+        assert_ne!(f1, f2);
+        assert_ne!(f2, f0);
+        // 帧数按 WATER_FRAMES 取模，超出别越界
+        assert_eq!(water_frame_rgba(WATER_FRAMES * 7 + 1), f1);
+        // alpha 全不透明（图集一直是这个约定，改了就有人透贴漏底）
+        assert!(f0.iter().skip(3).step_by(4).all(|&a| a == 255));
+        // 三帧的平均亮度得接近：只换相位不该整体变明变暗
+        let lum = |v: &[u8]| -> i64 {
+            v.iter().take(v.len() / 4 * 4).step_by(4).map(|&c| c as i64).sum()
+        };
+        assert!((lum(&f0) - lum(&f1)).abs() < lum(&f0) / 20, "换帧把整体亮度换了，看着会闪");
+        // 图集里那一格必须等于第 0 帧，不然运行时第一覆写就会"跳一下"
+        let a = atlas_rgba();
+        let x0 = (TILE_WATER as u32 * TILE_PX) as usize;
+        for y in 0..(TILE_PX as usize) {
+            let row = ((y * ATLAS_W as usize) + x0) * 4;
+            assert_eq!(&a[row..row + (TILE_PX as usize) * 4], &f0[y * 64..(y + 1) * 64]);
+        }
+    }
 
     #[test]
     fn 图集尺寸和声明一致() {

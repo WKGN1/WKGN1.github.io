@@ -937,6 +937,57 @@ def scene_base(u):
     log("背包工作台", "切模式也会给玩家留话（HUD 第 8 段）",
         '生存' in note_toggle or '创造' in note_toggle, "备注=%r" % note_toggle[:60])
 
+    # ---------------- 亮度档位 / 水的动画帧（从 OpusMC 那份代码学来的两条） ----------------
+    def dbg():
+        """第 9 段尾巴上那两个自动化字段：wf = 当前水帧号，br = 亮度档位。
+           画面外的东西也能判，不用靠我截图猜。"""
+        seg = str(s.ev("return String(window.__MCL_HUD || '').split('|')[8] || '';"))
+        m = re.search(r"wf(\d+) br(\d+)", seg)
+        return (int(m.group(1)), int(m.group(2)), seg) if m else (None, None, seg)
+
+    wf0, br0, seg0 = dbg()
+    log("亮度与水动画", "第 9 段尾巴带出了 wf / br 两个字段（水和亮度都能不靠截图判）",
+        wf0 is not None and br0 is not None, "第 9 段=%r" % seg0[:80])
+
+    wf_a = dbg()[0]
+    wf_b, waited = wf_a, 0.0
+    for _ in range(16):
+        time.sleep(0.5)
+        waited += 0.5
+        wf_b = dbg()[0]
+        if wf_b is not None and wf_b != wf_a:
+            break
+    log("亮度与水动画", "水自己在换帧：站着不动 wf 也会跳（覆写图集里那一格，不动网格）",
+        wf_a is not None and wf_b is not None and wf_a != wf_b and (wf_b or 9) <= 2,
+        "wf %s → %s，等了 %.1f 秒。一共 3 帧、游戏里 500ms 一帧；软件渲染时 dt 被钳在 0.1，"
+        "游戏里的钟比墙上的慢，所以按「最多等 8 秒看它跳不跳」判，不硬卡 1.4 秒" % (wf_a, wf_b, waited))
+
+    s.ev("window.__MCL_SET_BRIGHT(0);")
+    time.sleep(0.7)
+    g0 = dbg()[1]
+    sig0 = s.ev("return window.__T.sig();")
+    s.ev("window.__MCL_SET_BRIGHT(2);")
+    time.sleep(0.9)
+    g2 = dbg()[1]
+    sig2 = s.ev("return window.__T.sig();")
+    lift = rel_diff(sig2.get("all", 0), sig0.get("all", 0)) if "err" not in sig2 else 9.0
+    tol = max(6 * (base_all or 0), 0.01)
+    log("亮度与水动画", "「亮度：最高」真把画面提亮了（画面像素和的差远大于画面自漂本底）",
+        g0 == 0 and g2 == 2 and lift > tol,
+        "br %s → %s，全画面像素和相对差 %.4f（本底 %.5f，阈值 %.4f）" % (g0, g2, lift, base_all or 0, tol))
+
+    btn_txt = str(s.ev("return document.getElementById('btn-bright').textContent;"))
+    log("亮度与水动画", "顶栏那个按钮跟着改字（切档要给玩家看到的话）", "最高" in btn_txt,
+        "按钮文案=%r" % btn_txt)
+
+    # 亮度是显示偏好，存在浏览器里、不进存档：刷新一次还在（也顺带证明开局那条 410+n 真发出去了）
+    fresh_boot(s, u, 0)
+    g3 = dbg()[1]
+    log("亮度与水动画", "刷新之后亮度还留着（存 localStorage，不占存档字段）", g3 == 2,
+        "刷新后 br=%s（发档位的那条命令是 410+n）" % g3)
+    s.ev("window.__MCL_SET_BRIGHT(0);")
+    time.sleep(0.4)
+
     errs = s.ev("return window.__T.errs();")
     log("桌面基础", "这一轮交互没有报错", not errs, "｜".join(errs[:3])[:160])
 
@@ -1317,6 +1368,16 @@ def scene_static(u):
     Cnc = re.sub(r"/\*[\s\S]*?\*/", " ", C)   # 注释里也会写 clip-path 这个词，别被它骗
     clip_bad = [sel.strip().splitlines()[-1] for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", Cnc)
                 if "clip-path" in body and re.search(r"\.g-frame\b|#glcanvas\b", sel) and "::" not in sel]
+    def src_of(name):
+        """Rust 源码：着色器串、贴片常量这些不进页面，只能从源码本身判。"""
+        try:
+            with open(os.path.join(BLOG, "game", "src", name), encoding="utf-8") as f:
+                return f.read()
+        except OSError:
+            return ""
+
+    RS, BK = src_of("main.rs"), src_of("blocks.rs")
+    uv_decl = (re.search(r"varying \\w+ vec2 uv", RS) or ["", "读不到 main.rs"])[0] if RS else "读不到 main.rs"
     checks = [
         ("IndexedDB 打开有超时", re.search(r"rejectFn[\s\S]{0,400}?setTimeout|setTimeout[\s\S]{0,300}?rejectFn", L) is not None),
         ("IndexedDB 连接复用（不是每 3 秒开一个新连接）", re.search(r"if\s*\(dbConn\)\s*return", L) is not None),
@@ -1364,6 +1425,20 @@ def scene_static(u):
          'id="inv-body"' in I and 'id="inv-mode"' in I and ".g-inv-grid" in C and ".g-inv-rec" in C),
         ("背包数据是按字段名读的（往后加字段不用数第几段）",
          all(k in L for k in ("parseInv", "f.C", "f.B", "f.S", "f.R", "f.A"))),
+        ("片元里 uv 不再是 lowp（8 位在 224 宽的图集上误差快够 1 像素，会串贴片）",
+         None if not RS else ("varying mediump vec2 uv" in RS and "varying lowp vec2 uv" not in RS),
+         "uv 声明=%s" % uv_decl),
+        ("雾的距离按「水平距离」和「竖直距离的一半」取大的（低头看脚底不该起雾）",
+         None if not RS else ("length(rel.xz)" in RS and "abs(rel.y) * 0.5" in RS), ""),
+        ("亮度是跟「原样的自己」插值（0 档就是今天这个样子，不会先把画面整体压暗）",
+         None if not RS else ("uniform float u_bright" in RS and "mix(col, lift, u_bright)" in RS), ""),
+        ("顶栏有「亮度」按钮，档位存浏览器不进存档（显示偏好该跟着浏览器走）",
+         'id="btn-bright"' in I and "mcl.bright" in L, ""),
+        ("接住了 webglcontextlost（手机切后台、系统回收显卡回来不该只剩黑画布）",
+         "webglcontextlost" in L and "preventDefault" in L, ""),
+        ("水有三帧、运行时只覆写图集里那一格（不动网格、不重建 chunk）",
+         None if (not RS or not BK) else ("WATER_FRAMES" in BK and "water_frame_rgba" in BK
+                                          and "update_part" in RS), ""),
     ]
     for item in checks:
         log("静态检查", item[0], item[1], item[2] if len(item) > 2 else "")

@@ -330,7 +330,10 @@ attribute vec3 position;
 attribute vec2 texcoord;
 attribute vec4 color0;
 
-varying lowp vec2 uv;
+// uv 不能是 lowp：lowp 只有 8 位有效位，在 224 像素宽的图集上误差快够到 1 像素，
+// 采过去就是「一根棍子画成饼干」那类串贴片（OpusMC 的注释里为半精度栽过同一个跟头）。
+// shade / emissive 是 0..1 的乘数，留 lowp 没有意见。
+varying mediump vec2 uv;
 varying lowp float shade;
 varying lowp float emissive;
 varying mediump vec3 wpos;
@@ -350,10 +353,13 @@ void main() {
 }
 "#;
 
+/// 亮度三档对应的曲线混合量（`u_bright`）。0 = 今天原来的样子。
+const BRIGHT: [f32; 3] = [0.0, 0.45, 0.78];
+
 const FRAG: &str = r#"#version 100
 precision mediump float;
 
-varying lowp vec2 uv;
+varying mediump vec2 uv;
 varying lowp float shade;
 varying lowp float emissive;
 varying mediump vec3 wpos;
@@ -364,6 +370,7 @@ uniform vec3 u_eye;
 uniform vec3 u_fog_color;
 uniform float u_fog_near;
 uniform float u_fog_far;
+uniform float u_bright;     // 0 = 保持现在这样，越大越亮（夜里手机上真的有用）
 
 void main() {
     vec4 tex = texture2D(Texture, uv);
@@ -372,7 +379,18 @@ void main() {
     // 自发光方块不吃昼夜和 AO，夜里能看到自己亮的灯。
     col = mix(col, tex.rgb * 1.12, emissive);
 
-    float d = distance(wpos, u_eye);
+    // 亮度：把中间调抬起来、两端不动的一条曲线（OpusMC 用的也是这类：它在一条保守曲线和
+    // 一条 1-(1-x)^3 之间插值）。这边直接用「和原样的自己」插，u_bright=0 就是今天这个样子，
+    // 不会因为加了这条曲线先把画面整体压暗一截。高光（自发光那种 >1 的）留在曲线外面不被掐掉。
+    if (u_bright > 0.0) {
+        vec3 lift = 1.0 - pow(max(vec3(0.0), 1.0 - min(col, vec3(1.0))), vec3(3.0));
+        col = mix(col, lift, u_bright);
+    }
+
+    // 距离取「水平距离」和「竖直距离的一半」里大的那个（OpusMC 那条）：低头看脚底不该起雾 ——
+    // 竖直方向本来就只差几个方块，按三维直线距离算会把脚下也一起糊进雾里。
+    vec3 rel = wpos - u_eye;
+    float d = max(length(rel.xz), abs(rel.y) * 0.5);
     float f = clamp((d - u_fog_near) / max(u_fog_far - u_fog_near, 0.001), 0.0, 1.0);
     col = mix(col, u_fog_color, f * f);
 
@@ -404,6 +422,10 @@ fn make_material() -> Material {
                 macroquad::miniquad::UniformType::Float1,
             ),
             macroquad::miniquad::UniformDesc::new("u_fog_far", macroquad::miniquad::UniformType::Float1),
+            macroquad::miniquad::UniformDesc::new(
+                "u_bright",
+                macroquad::miniquad::UniformType::Float1,
+            ),
         ],
         // "Texture" 是 macroquad 的保留槽名：着色器里照写 uniform sampler2D Texture，
         // 但别列进这里——列了 make_pipeline 直接 panic（quad_gl.rs 里那句
@@ -507,6 +529,12 @@ struct Game {
     creative: bool,
     /// 「物品栏」面板开着：不许挖、不许放、不许走。
     paused: bool,
+    /// 亮度档位 0/1/2（页面里那个「亮度」按钮切的，存在浏览器 localStorage，不在存档里：
+    /// 这是显示偏好不是游戏状态，换设备该跟着浏览器走）。
+    bright: u8,
+    /// 当前水帧 + 计时器。每 0.5 秒换一帧，只覆写图集里水那一格 16×16。
+    water_frame: usize,
+    water_clock: f32,
     time_of_day: f32,
     phase: Phase,
     chunks: Vec<Option<Mesh>>,
@@ -557,6 +585,9 @@ impl Game {
             note: "",
             note_timer: 0.0,
             atlas: None,
+            bright: 0,
+            water_frame: 0,
+            water_clock: 0.0,
         }
     }
 
@@ -784,6 +815,10 @@ impl Game {
                 }
             }
             300 => self.toggle_creative(),
+            410..=412 => {
+                // 亮度档位。数值表在页面那边（BRIGHT[u_bright] 那档曲线），这边只收档位。
+                self.bright = (cmd - 410) as u8;
+            }
             400 => self.paused = true,
             401 => self.paused = false,
             6000..=7999 => {
@@ -845,12 +880,14 @@ impl Game {
         // 第 9 段是位姿读数（位置 + 朝向），界面上只映射前 8 段所以不会显示，
         // 留给外部自动化测试用：有了 yaw/pitch 才能验「往右拖是不是真往右转」这种方向问题。
         let pos = format!(
-            "x{:.2} y{:.2} z{:.2} yaw{:.3} pitch{:.3}",
+            "x{:.2} y{:.2} z{:.2} yaw{:.3} pitch{:.3} wf{} br{}",
             self.player.pos[0],
             self.player.pos[1],
             self.player.pos[2],
             self.player.yaw,
-            self.player.pitch
+            self.player.pitch,
+            self.water_frame,
+            self.bright
         );
         let sel = self.inv.selected_slot();
         let held = if self.creative {
@@ -1366,6 +1403,29 @@ async fn main() {
         });
 
         if matches!(game.phase, Phase::Running) {
+            // 水的动画：每 0.5 秒换一帧，覆写图集里 TILE_WATER 那一格（16×16，1024 字节）。
+            // 只改纹理不改网格，所以挖开放水都不会因为动画多算一遍。暂停时不换 = 水也冻住，
+            // 和「暂停就是停住」这条一致。图集是 Nearest 采样，半像素内缩的 UV 不会漏到邻贴。
+            game.water_clock += dt;
+            if game.water_clock >= 0.5 {
+                game.water_clock -= 0.5;
+                game.water_frame = (game.water_frame + 1) % b::WATER_FRAMES;
+                if let Some(ref atlas) = game.atlas {
+                    // macroquad 0.4.16 的 Image 没有 from_rgba，字段倒是全 public，直接拼。
+                    let img = macroquad::texture::Image {
+                        bytes: b::water_frame_rgba(game.water_frame),
+                        width: b::TILE_PX as u16,
+                        height: b::TILE_PX as u16,
+                    };
+                    atlas.update_part(
+                        &img,
+                        (b::TILE_WATER as i32) * (b::TILE_PX as i32),
+                        0,
+                        b::TILE_PX as i32,
+                        b::TILE_PX as i32,
+                    );
+                }
+            }
             material.set_uniform("u_day", daylight(game.time_of_day));
             material.set_uniform("u_eye", eye_v);
             material.set_uniform(
@@ -1374,6 +1434,7 @@ async fn main() {
             );
             material.set_uniform("u_fog_near", FOG_NEAR);
             material.set_uniform("u_fog_far", FOG_FAR);
+            material.set_uniform("u_bright", BRIGHT[game.bright as usize % BRIGHT.len()]);
 
             gl_use_material(&material);
             for chunk in game.chunks.iter().flatten() {

@@ -487,7 +487,8 @@ function registerBridge() {
 
       // 「物品栏」面板的命令队列：页面塞一条，Rust 每帧 take 走一条，取走即清。
       // 命令号：1..9 选快捷格 / 100+n 背包第 n 格跟手上对调 / 200+k 合第 k 条配方 /
-      // 300 切创造生存 / 400 面板开（暂停）/ 401 面板关 / 6000+方块id*100+数量 给料（自动化用）。
+      // 300 切创造生存 / 400 面板开（暂停）/ 401 面板关 / 410+n 亮度档位 /
+      // 6000+方块id*100+数量 给料（自动化用）。
       env.mcl_take_ui_cmd = function () {
         if (!uiQueue.length) return 0;
         var c = uiQueue.shift();
@@ -754,6 +755,43 @@ function showFallback(msg) {
     btn.onclick = function () { location.replace(retryHref()); };
   }
 }
+
+// 亮度三档的名字。数值（0 / 0.45 / 0.78）在 Rust 那边的 BRIGHT 表里，这边只管档位和文案。
+var BRIGHT_NAMES = ['亮度：标准', '亮度：提高', '亮度：最高'];
+var brightLevel = 0;
+try { brightLevel = parseInt(localStorage.getItem('mcl.bright') || '0', 10) | 0; } catch (e) { brightLevel = 0; }
+if (brightLevel !== 0 && brightLevel !== 1 && brightLevel !== 2) brightLevel = 0;
+
+function brightLabel() {
+  var b = $('btn-bright');
+  if (b) b.textContent = BRIGHT_NAMES[brightLevel];
+}
+
+function setBright(n) {
+  brightLevel = (n | 0) % BRIGHT_NAMES.length;
+  if (brightLevel < 0) brightLevel += BRIGHT_NAMES.length;
+  try { localStorage.setItem('mcl.bright', String(brightLevel)); } catch (e) {}
+  uiCmd(410 + brightLevel);
+  brightLabel();
+}
+
+window.__MCL_SET_BRIGHT = function (n) { setBright(n | 0); return brightLevel; };
+
+// 手机切后台、系统回收显卡、驱动抽风都会把 WebGL 上下文弄丢，macroquad 不会自己恢复它：
+// 画布就永远停在最后一帧或直接黑屏，看着像"游戏卡死"。接住事件、说清原因、给一键刷新，
+// 别让它默默烂掉（存档每 3 秒存一次，刷新回来最多丢 3 秒）。
+(function () {
+  var c = $('glcanvas');
+  if (!c || !c.addEventListener) return;
+  try {
+    c.addEventListener('webglcontextlost', function (ev) {
+      if (ev && ev.preventDefault) ev.preventDefault();   // 拦下来才不给 GL 刷一堆错误
+      window.__MCL_CTX_LOST = 1;
+      showFallback('显卡的 WebGL 上下文断了（手机切后台、系统回收显卡、驱动抽风都会）。' +
+        '存档每 3 秒存一次，刷新回来最多丢 3 秒。');
+    }, false);
+  } catch (e) {}
+})();
 
 // ---------------------------------------------------------------------------
 // 物品栏：数据走 HUD 的第 10 段（Rust 推的，形状见 inv.rs 的 inv_text），
@@ -1420,6 +1458,13 @@ function wireButtons() {
     }, false);
   }
 
+  // 亮度：三档，切了就发命令 410+n，曲线在着色器那边（u_bright）。
+  // 存 localStorage 不进存档 —— 这是显示偏好，换台设备该跟着浏览器走，不该跟着世界走。
+  var bb = $('btn-bright');
+  if (bb && bb.addEventListener) bb.addEventListener('click', function () { setBright(brightLevel + 1); }, false);
+  brightLabel();
+  uiCmd(410 + brightLevel);   // 开局把存下来的档位告诉 wasm（队列它会一帧帧取走）
+
   // 电脑上：E 开关物品栏，Esc 也关（跟真全屏那条不冲突——全屏时 Esc 先解指针锁定）
   if (window.addEventListener) {
     try {
@@ -1427,6 +1472,7 @@ function wireButtons() {
         var k = ev && ev.key ? String(ev.key).toLowerCase() : '';
         var code = ev && ev.keyCode ? ev.keyCode : 0;
         if (k === 'e' || code === 69) { toggleInv(); return; }
+        if (k === 'b' || code === 66) { setBright(brightLevel + 1); return; }
         if (invOpen && (k === 'escape' || code === 27)) setInv(false);
       }, false);
     } catch (e) {}
