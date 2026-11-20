@@ -10,8 +10,8 @@
 | 系统 | Ubuntu 26.04.1 LTS（内核 7.0.0-43-generic） |
 | CPU | Intel Xeon E5-2698 v3 @ 2.30GHz，逻辑核心 32 |
 | 内存 | 62 GB |
-| 仓库所在盘 | 还剩 667G，挂载点 `/run/media/suyzz/e2270998-5ad9-4aef-860c-ba06f27ea0a9` |
-| `/home` | 还剩 402G |
+| 仓库所在盘 | 825G，还剩 667G。挂载点 `/run/media/suyzz/e2270998-5ad9-4aef-860c-ba06f27ea0a9`（一块 NVMe，UUID 就是那一串） |
+| `/home` 所在的根盘 | 468G，还剩 402G（`/home` 不是独立分区，就挂在根盘上） |
 | 中文字体 | 89 个（拼图时用的是 `/usr/share/fonts/opentype/noto/` 底下的 Noto CJK） |
 
 ## 版本
