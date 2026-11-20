@@ -5,7 +5,7 @@
 //! 这是这个小彩蛋最大的省力点。
 
 use crate::blocks::{self as b, AIR};
-use crate::noise::{fbm, hash2};
+use crate::noise::{fbm, fbm3, hash2};
 
 pub const SX: i32 = 96;
 pub const SY: i32 = 48;
@@ -52,6 +52,9 @@ pub fn in_bounds(x: i32, y: i32, z: i32) -> bool {
 }
 
 impl World {
+    /// 注意最后那句 `changed = 0`：洞穴是用玩家那条 `set()` 挖的（顺手把"改动"加了 12517），
+    /// 而"改动"的意思是"玩家动过多少格"，所以生成完必须清掉，不然 HUD 一开机就写一万多，
+    /// 『清档后改动归零』这类判据全被撞红（我这轮就是这么红的）。
     pub fn new(seed: u32) -> Self {
         let mut w = World {
             seed,
@@ -62,6 +65,7 @@ impl World {
         };
         w.generate();
         w.relight_all();
+        w.changed = 0; // 地形摆的格子不算玩家动的（见上面的注释）
         w
     }
 
@@ -406,7 +410,61 @@ impl World {
             }
         }
 
+        self.carve_caves(); // 树还没种，先挖洞：不然树可能长在悬空的格子上
         self.grow_trees();
+    }
+
+    /// 用两条 3D 噪声场雕隧道：`a² + b² < T` 这种"两个场都同时接近零"的条件出来的截面是细长的
+    /// 管子（各自卡一个阈值出来的是片状的空腔，走不舒服），再拿第三层噪声当门控，把太浅太密的地方
+    /// 筛掉，越深越容易通过 —— 深处更空，往上越来越实。数字是自己调的，公式形状来自 OpusMC 那条
+    /// 公开的隧道判据，不是抄它的地图数据。
+    /// 顶面下面留两格当盖子（不然地面到处是窟窿，走路就掉下去了）；世界最底下两格不挖（那是壳）。
+    /// 挖空之后 y <= LAVA_LEVEL 的那些格填岩浆：正好落在洞底，洞穴深处自己有光源。
+    fn carve_caves(&mut self) {
+        const T: f32 = 0.012;   // 隧道粗细：0.0155 时地下 9.2% 是空的，软件渲染下帧率从 61 掉到 28，
+        //                      // 砍到 0.012 少挖一点，先保帧率（洞穴密度不是我优先的东西）。
+        const S: f32 = 0.25;    // 采样缩放：一个噪声周期 = 4 格
+        const LAVA_LEVEL: i32 = 6;
+        for z in 1..SZ - 1 {
+            for x in 1..SX - 1 {
+                let top = self.top_solid(x, z);
+                if top < 8 {
+                    continue; // 太矮的柱子（岛边、水面）不挖，免得把地形啃穿
+                }
+                let hlim = (top - 2).min(SY - 2);
+                for y in 2..=hlim {
+                    let fx = x as f32 * S;
+                    let fy = y as f32 * S * 1.35; // 竖方向采样密一点：洞就更扁、更像能走的洞道而不是竖井
+                    let fz = z as f32 * S;
+                    let a = fbm3(fx + 11.3, fy, fz - 7.1, self.seed ^ 0x51ed_270b) - 0.5;
+                    let bb = fbm3(fx - 3.7, fy + 5.9, fz + 2.3, self.seed ^ 0x2545_f491) - 0.5;
+                    if a * a + bb * bb >= T {
+                        continue;
+                    }
+                    // 门控：再筛一层，别把浅层掏成瑞士奶酪；越深越松
+                    let g = fbm3(
+                        fx * 0.53 + 31.0,
+                        fy * 0.53,
+                        fz * 0.53 - 17.0,
+                        self.seed ^ 0x27d4_eb2f,
+                    );
+                    let gate = if y >= 20 {
+                        0.58
+                    } else {
+                        0.58 - (20 - y) as f32 * 0.009
+                    };
+                    if g < gate {
+                        continue;
+                    }
+                    let id = self.get(x, y, z);
+                    if id == b::AIR || id == b::WATER {
+                        continue;
+                    }
+                    let to = if y <= LAVA_LEVEL { b::LAVA } else { b::AIR };
+                    self.set(x, y, z, to);
+                }
+            }
+        }
     }
 
     fn grow_trees(&mut self) {
@@ -503,6 +561,225 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 「改动」说的是玩家动过多少格。地形自己生成时那十几万格也是走 set() 摆上去的，
+    /// 要是忘了清零，HUD 一开机就写一万多，『清档后归零』『刷新前后对得上』这类判据全红。
+    #[test]
+    fn 刚生成的世界改动数必须是零() {
+        for seed in [1u32, 7, 20261120] {
+            let w = World::new(seed);
+            assert_eq!(
+                w.changed,
+                0,
+                "种子 {} 刚生成完「改动」就是 {}：地形自己摆的格子被算成玩家动的了",
+                seed,
+                w.changed
+            );
+        }
+        let w = World::new(5);
+        assert!(w.top_solid(48, 48) > 10, "种子 5 地形没起来，这条测不出东西");
+
+        // 读档这条路也得盖住：`from_raw` 会照同一颗种子重建一份，对比着数出"玩家动过多少格"。
+        // 我上一轮把"生成完归零"顺手也写进了 from_raw，于是挖一格 → 存 → 读回来 → 改动 = 0，
+        // 画面里坑还在、HUD 却说你一个方块都没动过。当时单元测试是绿的、自动化是红的，
+        // 因为我那条新测试只测了 new()：盖不住的路径等于没测。
+        let mut 存 = World::new(5);
+        let 地面 = 存.top_solid(48, 48);
+        let 换个 = if 存.get(48, 地面, 48) == b::STONE { b::DIRT } else { b::STONE };
+        存.set(48, 地面, 48, 换个);
+        assert_eq!(存.changed, 1, "自己挖一格，「改动」该是 1");
+        let 读回 = World::from_raw(5, 存.data.clone()).expect("存的档读回来");
+        assert_eq!(
+            读回.changed,
+            1,
+            "挖了一格再读回来「改动」成了 {}：坑还在画面里、HUD 却说没动过 —— 归零写错地方了",
+            读回.changed
+        );
+    }
+
+    /// 洞穴到底挖出多少东西：太少等于没生成，太多等于把地形啃空。数字直接打出来，
+    /// 下次调参数不用靠猜。（这几个阈值是先量一遍再写死的，不是先写死再凑数字。）
+    #[test]
+    fn 地下真的有隧道空腔而且地面不会被啃穿() {
+        let mut 地下总格 = 0usize;
+        let mut 空腔 = 0usize;
+        let mut 破顶 = 0usize;
+        for seed in 1..=4u32 {
+            let w = World::new(seed);
+            for z in 1..SZ - 1 {
+                for x in 1..SX - 1 {
+                    let top = w.top_solid(x, z);
+                    if top < 2 {
+                        continue;
+                    }
+                    // 盖子：顶面那一格和它下面那一格都不许是空的，不然走路就直接掉进洞里
+                    if w.get(x, top, z) == b::AIR || w.get(x, top - 1, z) == b::AIR {
+                        破顶 += 1;
+                    }
+                    for y in 2..=(top - 2) {
+                        地下总格 += 1;
+                        if w.get(x, y, z) == b::AIR {
+                            空腔 += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let 比例 = 空腔 as f64 / (地下总格 as f64).max(1.0);
+        println!(
+            "洞穴统计：四个种子、地下 {} 格，挖空 {} 格（{:.2}%），破顶 {} 格",
+            地下总格,
+            空腔,
+            比例 * 100.0,
+            破顶
+        );
+        assert!(空腔 > 3000, "四个种子加起来才挖出 {} 格空腔：这不叫洞穴，叫没生成", 空腔);
+        assert!(
+            比例 < 0.18,
+            "地下 {:.1}% 都是空的：地形被啃空了，玩家随便挖两下就掉进虚空",
+            比例 * 100.0
+        );
+        assert_eq!(破顶, 0, "地面被啃穿 {} 格：走路就得掉下去，盖子留薄了", 破顶);
+    }
+
+    /// 岩浆只许出现在最深处（y <= 6），而且必须落在洞穴底上 —— 周围一格空腔都没有的岩浆
+    /// 不叫洞底岩浆，叫埋在石头里。顺带验它真把光推出去了：这才是"洞穴有天然光源"的意思。
+    #[test]
+    fn 岩浆只在最深处落在洞底还把周围照亮() {
+        let w = World::new(11);
+        let mut 岩浆格: Vec<[i32; 3]> = Vec::new();
+        let mut 跑到高处 = 0usize;
+        let mut 埋死 = 0usize;
+        let mut 露在洞底 = 0usize;
+        for z in 0..SZ {
+            for x in 0..SX {
+                for y in 0..SY {
+                    if w.get(x, y, z) != b::LAVA {
+                        continue;
+                    }
+                    岩浆格.push([x, y, z]);
+                    if y > 6 {
+                        跑到高处 += 1;
+                    }
+                    let 空格邻居 = NEIGH
+                        .iter()
+                        .filter(|n| w.get(x + n[0], y + n[1], z + n[2]) == b::AIR)
+                        .count();
+                    if 空格邻居 == 0 {
+                        埋死 += 1; // 只是信息：岩浆是一片一片的（湖），湖中间本来就没空气邻居
+                    }
+                    if y + 1 < SY && w.get(x, y + 1, z) == b::AIR {
+                        露在洞底 += 1; // 头顶就是空腔：这才是"洞底的岩浆"
+                    }
+                }
+            }
+        }
+        let mut 洞底最亮 = 0u8;
+        let mut 往上三格最亮 = 0u8;
+        for c in 岩浆格.iter() {
+            let (x, y, _z) = (c[0], c[1], c[2]);
+            if y + 1 < SY && w.get(x, y + 1, _z) == b::AIR {
+                洞底最亮 = 洞底最亮.max(w.block_light(x, y + 1, _z));
+            }
+            if y + 3 < SY && w.get(x, y + 3, _z) == b::AIR {
+                往上三格最亮 = 往上三格最亮.max(w.block_light(x, y + 3, _z));
+            }
+        }
+        println!(
+            "岩浆统计：{} 格；跑到 y>6 的 {} 格；周围一格空都没有的 {} 格（湖中间正常）；露在洞底的 {} 格；\
+             洞底正上方那格最亮 {}，往上三格最亮 {}",
+            岩浆格.len(),
+            跑到高处,
+            埋死,
+            露在洞底,
+            洞底最亮,
+            往上三格最亮
+        );
+        assert!(岩浆格.len() > 200, "深处只有 {} 格岩浆：岩浆层没铺起来", 岩浆格.len());
+        assert_eq!(跑到高处, 0, "有 {} 格岩浆跑到 y>6 之上，深度限制写漏了", 跑到高处);
+        assert!(
+            露在洞底 >= 200,
+            "只有 {} 格岩浆是露在洞底的（头顶就是空腔）：那岩浆就不是洞穴的地板，是埋在地壳里的一层",
+            露在洞底
+        );
+        assert_eq!(b::light_emission(b::LAVA), 15, "岩浆不发光的话，洞穴深处就还是黑的");
+        assert!(
+            洞底最亮 >= 12,
+            "岩浆正上方那格的方块光才 {} 级：它没把洞照亮，发光那一步接不上",
+            洞底最亮
+        );
+        assert!(
+            往上三格最亮 >= 6,
+            "岩浆上方三格才 {} 级：光推不出去，洞穴深处仍然是黑的",
+            往上三格最亮
+        );
+    }
+
+    /// 地下平均要比地面暗得多。注意这条不判"上面压着实心就该全黑"—— 光会从旁边漏进来
+    /// （横向传播本来就是这个规矩，MC 也这样），我第一版就是把判据写成那样，被自己的物理打了。
+    /// 彻底密封的空间该是全黑，那条由 mesh.rs 里『石头屋里没灯是全黑』钉着，这儿不重复。
+    #[test]
+    fn 实心地底下没有光源的空腔天光必须是零() {
+        let w = World::new(4);
+        let mut 地下空腔 = 0usize;
+        let mut 天光和 = 0u64;
+        let mut 被照亮的 = 0usize;
+        let mut 地表天光和 = 0u64;
+        let mut 地表格 = 0usize;
+        for z in 1..SZ - 1 {
+            for x in 1..SX - 1 {
+                let top = w.top_solid(x, z);
+                if top < 12 {
+                    continue;
+                }
+                // 地面以上那一格才是真露天：top 是最上面那块实心方块，空气在它上面（top+1）。
+                // 我这儿先写成了 top-1，于是「地面平均天光」量到的是地壳里的 1.14 级，判据当然过不去。
+                地表天光和 += w.sky_light(x, (top + 1).min(SY - 1), z) as u64;
+                地表格 += 1;
+                let y = top - 8;
+                if w.get(x, y, z) != b::AIR {
+                    continue;
+                }
+                地下空腔 += 1;
+                天光和 += w.sky_light(x, y, z) as u64;
+                if w.block_light(x, y, z) > 0 {
+                    被照亮的 += 1; // 被岩浆照到是我们想要的，不算这条的错
+                }
+            }
+        }
+        let 地下均 = 天光和 as f64 / (地下空腔 as f64).max(1.0);
+        let 地表均 = 地表天光和 as f64 / (地表格 as f64).max(1.0);
+        println!(
+            "地下暗度统计：地下空腔 {} 格、平均天光 {:.2} 级；地面平均天光 {:.2} 级；被光源照到的 {} 格",
+            地下空腔,
+            地下均,
+            地表均,
+            被照亮的
+        );
+        assert!(
+            地下空腔 > 200,
+            "只找到 {} 格地下空腔：这条等于没测，洞穴太少了",
+            地下空腔
+        );
+        assert!(
+            地下均 + 3.0 < 地表均,
+            "地下平均天光 {:.2} 级、地面 {:.2} 级：地下不比地面暗多少，那洞穴进去跟在外面没区别",
+            地下均,
+            地表均
+        );
+    }
+
+    #[test]
+    fn 同一颗种子生成的洞穴必须一模一样() {
+        let a = World::new(20261120);
+        let b = World::new(20261120);
+        assert_eq!(
+            a.data, b.data,
+            "同一颗种子两次生成不一样：洞穴那一步吃了不确定的量（浮点？迭代顺序？）"
+        );
+        let c = World::new(20261121);
+        assert_ne!(a.data, c.data, "换了种子地形还一模一样：seed 没进洞穴的噪声里");
+    }
 
     /// 造一个说得清的场景：把 (bx..bx+11, 18..26, bz..bz+11) 腾空，y=20 铺地板、
     /// y=25 盖一层石头顶。要露天天光就自己把顶顶穿。

@@ -18,6 +18,8 @@ pub const SNOW: u8 = 9;
 pub const LAMP: u8 = 10;
 pub const SNOW_GRASS: u8 = 11; // 生成时用的过渡块：草但顶面是雪
 pub const WORKBENCH: u8 = 12; // 工作台：合成高阶配方的门槛，只能合成出来
+pub const LAVA: u8 = 13; // 岩浆：洞穴深处的发光石头。**不会流动**（我们没有流体），
+                         // 就是一块"亮着的、烫手的、能挖能放"的方块，先解决洞穴没光源的问题。
 
 /// 创造模式下给的全套（水也算：创造能凭空放出水来）。
 pub const ALL_PLACEABLE: [u8; 11] = [
@@ -41,7 +43,8 @@ pub const TILE_BENCH_SIDE: u8 = 12;
 pub const TILE_BENCH_TOP: u8 = 13;
 
 pub const TILE_PX: u32 = 16;
-pub const TILE_COUNT: u32 = 14;
+pub const TILE_LAVA: u8 = 14;
+pub const TILE_COUNT: u32 = 15;
 
 /// 水的动画帧数。图集里水**只占一格**（TILE_WATER），运行时把第 k 帧覆写进那一格：
 /// 不动网格、不重建 chunk、也不用给顶点加"第几帧"这一维（OpusMC 那边是靠纹理层号换帧，
@@ -75,6 +78,7 @@ pub fn is_transparent(id: u8) -> bool {
 /// 空气和水给 0：射线本来就穿水而过（水挖不到），0 也保证不会被点到。
 pub fn hardness(id: u8) -> f32 {
     match id {
+        LAVA => 2.5,
         GRASS | SNOW_GRASS => 0.6,
         DIRT | SAND => 0.5,
         STONE => 1.5,
@@ -127,7 +131,8 @@ pub fn light_emission(id: u8) -> u8 {
 }
 
 pub fn is_emissive(id: u8) -> bool {
-    id == LAMP
+    // 萤石灯和岩浆都发光：岩浆是洞穴深处的天然光源，不用玩家先跑到那儿摆灯。
+    id == LAMP || id == LAVA
 }
 
 /// 水：不能挖开放，碰撞和重力在 phys.rs 里单独处理。
@@ -144,6 +149,7 @@ pub fn face_tile(id: u8, face: usize) -> u8 {
     // face: 0=-X 1=+X 2=-Y 3=+Y 4=-Z 5=+Z（和 mesh.rs 里的顺序一致）
     let side = matches!(face, 0 | 1 | 4 | 5);
     match id {
+        LAVA => TILE_LAVA,
         GRASS => {
             if face == 3 {
                 TILE_TOP
@@ -190,6 +196,7 @@ pub fn face_tile(id: u8, face: usize) -> u8 {
 
 pub fn block_name(id: u8) -> &'static str {
     match id {
+        LAVA => "岩浆",
         GRASS => "草方块",
         SNOW_GRASS => "雪草",
         DIRT => "泥土",
@@ -234,6 +241,23 @@ fn shade(c: [u8; 3], k: f32) -> [u8; 3] {
 fn paint_tile(tile: u8, x: u32, y: u32) -> [u8; 3] {
     let j = jitter(x, y, tile as u32);
     match tile {
+        TILE_LAVA => {
+            // 岩浆：暗色的石头底子 + 一摊一摊暖色熔体 + 零星更亮的火星，颜色全是我自己调的。
+            // 关键是"一摊一摊"：均匀一片橙看着像塑料，不均匀才像烧着的东西。
+            let j = jitter(x, y, TILE_LAVA as u32);
+            let blotch = (((x as f32 * 0.55 + y as f32 * 0.9).sin()
+                + (y as f32 * 0.4 - x as f32 * 0.25).sin())
+                + 2.0)
+                * 0.25;
+            let hot = (blotch * 0.75 + j * 0.55).clamp(0.0, 1.0);
+            if hot > 0.78 {
+                shade(rgb(255, 198, 92), 0.92 + (hot - 0.78) * 0.35) // 火星
+            } else if hot > 0.56 {
+                shade(rgb(214, 96, 34), 0.82 + (hot - 0.56) * 0.6) // 熔体
+            } else {
+                shade(rgb(74, 40, 34), 0.86 + j * 0.3) // 凉掉的壳
+            }
+        }
         TILE_TOP => {
             let base = rgb(104, 154, 62);
             shade(base, 1.0 + j * 0.13)
