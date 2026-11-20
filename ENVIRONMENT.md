@@ -69,7 +69,8 @@ python3 game/regress.py                      # 全套自动化：150 条断言�
 2. 无头 Firefox 的窗口**最小宽度约 500 像素**，"手机视口"在这儿其实是最小 500 宽，不是 390。
 3. 软件渲染时 `dt` 被钳在 0.1，**游戏里的钟比墙上慢** —— 按"游戏里的时间"判的断言不能硬卡墙上秒数。
 4. 微信这个渠道 `send_to_wechat` 发**非图片文件会被拒**（`.js`、`.txt` 都是 `prepare failed`）；要给他文件就走站上链接。
-5. B 站的官方玩具页会注入一段采集脚本每 300 ms 读画面（看别人作品时卡 98% 就是这个）。
+5. **github.com 的 HTTPS 直连在这台机器上不通**：`curl https://github.com/…` 和 `raw.githubusercontent.com` 都是 000（连不上）。只有 SSH 能用（`git push` / `git ls-remote` 走 22 或者 ssh 配置）。**想确认远端到了哪个提交，用 `git ls-remote origin refs/heads/main`**；线上内容要看 `wkgn1.github.io`，那个是通的。
+6. 我平时写的 `git -c http.proxy= push` 其实没必要（git 全局没配 proxy），留着只是习惯，不改也没事。
 
 ## 手头其它东西
 
