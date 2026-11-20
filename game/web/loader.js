@@ -507,6 +507,10 @@ function registerBridge() {
         wantFly = false;
         return v;
       };
+      // 潜行是「状态」不是「一下」：按着就一直回 1，松手回 0。跟 jump 那条反着写是有原因的。
+      env.mcl_sneak_held = function () {
+        return wantSneak ? 1 : 0;
+      };
       env.mcl_take_slot = function () {
         var v = wantSlot;
         wantSlot = 0;
@@ -872,6 +876,8 @@ function hotCells(f, sel, creative) {
 }
 
 var hotLast = '';
+var mineLast = '';
+var wantSneak = false;   // 手机端「潜行」按钮按着与否；按住型，不像 jump 那样取走即清
 function renderHot() {
   var box = $('hot-cells');
   if (!box || hotLast === invText) return;   // 没变就别碰 DOM（跟面板一条路子）
@@ -969,6 +975,24 @@ function tickHud() {
     if (id === 'hud-note') el.hidden = (v === ''); // 备注平时是空的，别挂个空块在画面上
   }
   // 第 10 段是物品栏的数据。面板开着才画，关着只留一份最新的等点开用。
+  // 第 11 段：挖掘进度「哪种方块:点了几下:共需几下」。空 = 没在挖，那条小横杠收掉。
+  var mp = parts[10];
+  if (mp != null && mp !== mineLast) {
+    mineLast = mp;
+    var mbar = $('minebar');
+    var mfill = $('minebar-fill');
+    if (mbar && mfill) {
+      var mseg = String(mp).split(':');
+      var total = parseInt(mseg[2], 10) | 0;
+      var done = parseInt(mseg[1], 10) | 0;
+      if (!total || total < 1) {
+        mbar.hidden = true;
+      } else {
+        mfill.style.width = Math.max(0, Math.min(100, Math.round((done * 100) / total))) + '%';
+        mbar.hidden = false;
+      }
+    }
+  }
   var it = parts[9];
   if (it != null && it !== invText) {
     invText = String(it);
@@ -1468,6 +1492,35 @@ function wireButtons() {
   wireHudTap('btn-jump', function () { wantJump = true; });
   wireHudTap('btn-fly', function () { wantFly = true; });
   wireHudTap('btn-inv', function () { toggleInv(); });
+
+  // 「潜行」不能用 wireHudTap：那条是「按一下置标志、Rust 取走即清」，
+  // 潜行要的是按着期间一直为真。按住置位、松开（包括滑出去、系统打断）清零。
+  var sneakBtn = $('btn-sneak');
+  if (sneakBtn && sneakBtn.addEventListener) {
+    var setSneak = function (on) {
+      return function (ev) {
+        if (ev && ev.preventDefault) { try { ev.preventDefault(); } catch (e) {} }
+        if (ev && ev.stopPropagation) { try { ev.stopPropagation(); } catch (e) {} }
+        wantSneak = on;
+        if (sneakBtn.setAttribute) {
+          if (on) { sneakBtn.setAttribute('data-on', '1'); }
+          else { sneakBtn.removeAttribute('data-on'); }
+        }
+      };
+    };
+    var releaseSneak = setSneak(false);
+    if ('onpointerdown' in window) {
+      // 监听挂在 window 上：手指从按钮上滑出去之后松开也得关掉，不然一直当成蹲着
+      sneakBtn.addEventListener('pointerdown', setSneak(true), false);
+      window.addEventListener('pointerup', releaseSneak, false);
+      window.addEventListener('pointercancel', releaseSneak, false);
+    } else {
+      sneakBtn.addEventListener('touchstart', setSneak(true), false);
+      sneakBtn.addEventListener('mousedown', setSneak(true), false);
+      window.addEventListener('touchend', releaseSneak, false);
+      window.addEventListener('mouseup', releaseSneak, false);
+    }
+  }
 
   // 面板里的点法：格子带 data-cmd，一个委托监听全接住（每 0.2 秒可能整块重画，
   // 一个个挂监听会越挂越多）。

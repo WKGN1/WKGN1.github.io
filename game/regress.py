@@ -406,8 +406,11 @@ def dig_with_aim(s, W, H, initial_dy=0):
             total += dy
         n0 = changed_count(s)
         a = s.ev("return window.__T.sig();")
-        click(s, W // 2, H // 2, 0)
-        n1 = changed_count(s)
+        for _ in range(4):   # 生存有硬度了：石头要连点三下才碎，一下不碎是正常，别当挖不动
+            click(s, W // 2, H // 2, 0)
+            n1 = changed_count(s)
+            if n1 > n0:
+                break
         b = s.ev("return window.__T.sig();")
         if n1 > n0 and "err" not in a and "err" not in b:
             return total, n1 - n0, (b["cen"] - a["cen"]), abs(b["ratio"] - a["ratio"])
@@ -501,7 +504,8 @@ def scene_base(u):
         % (round(time.time() - t_boot, 1), s.ev("return window.__T.vis('gate');")))
     log("桌面基础", "兜底没露出", s.ev("return window.__T.vis('fallback');") == "hidden")
     hud = s.ev("return window.__MCL_HUD;")
-    log("桌面基础", "HUD 有 10 段（第 10 段是物品栏的数据）（第 10 段是给我的调试位姿）", len(hud.split("|")) == 10, hud)
+    log("桌面基础", "HUD 有 11 段（位姿在第 9 段、物品栏数据第 10 段、挖掘进度第 11 段）",
+        len(hud.split("|")) == 11, hud)
     # 第 1 段（第几格）现在只以「底栏哪格亮着」的形式存在，不再写文字；第 2 段（手里那种）
     # 挪到了底栏上面那一行。所以这儿从第 2 段起对，一共七格。
     dom = s.ev("return ['hot-held','hud-mode','hud-clock','hud-changed','hud-fps','hud-save','hud-note']"
@@ -796,10 +800,11 @@ def scene_base(u):
             if dy:
                 drag_look(s, W // 2, H // 2, dy)
             a0, b0 = changed_count(s), bag_all()
-            click(s, W // 2, H // 2, 0)
-            a1, b1 = changed_count(s), bag_all()
-            if a1 > a0:
-                return a0, a1, b0, b1
+            for _ in range(4):   # 生存有硬度：连点到碎为止
+                click(s, W // 2, H // 2, 0)
+                a1, b1 = changed_count(s), bag_all()
+                if a1 > a0:
+                    return a0, a1, b0, b1
         return a0, a1, b0, b1
 
     def try_place():
@@ -905,8 +910,19 @@ def scene_base(u):
     s.ev("window.__MCL_INV_OPEN(0);")
     time.sleep(0.7)
     q0, q1, _, _ = try_place()
+    # 放完可能比 4 格更远：现在挖到碎为止，准星可能落在更远那一格上，放的位置就跟着远了。
+    # 「站旁边才解锁高阶配方」本来就是玩家的活儿，所以判据该朝它走两步 —— 别把我的挖掘
+    # 节奏改动算成游戏坏了（上一轮这条一次点击就挖开，放得近，所以没人发现判据是贴着旧打法写的）。
+    for _ in range(4):
+        if str(invf().get('B')) == '1':
+            break
+        s.ev("window.__T.keydown('KeyW','w');")
+        time.sleep(0.6)
+        s.ev("window.__T.keyup('KeyW','w');")
+        time.sleep(0.4)
+        drag_look(s, W // 2, H // 2, -60)   # 边走边低头找那块工作台
     f = invf()
-    log("背包工作台", "工作台放到地上，人就站在旁边（B 段变 1）", q1 > q0 and str(f.get('B')) == '1',
+    log("背包工作台", "工作台放到地上，走过去站旁边（B 段变 1）", q1 > q0 and str(f.get('B')) == '1',
         "改动 %d → %d，B=%s" % (q0, q1, f.get('B')))
     s.ev("window.__MCL_GIVE(8, 4);")          # 树叶 4：解锁的那条该能合
     time.sleep(0.8)
@@ -960,7 +976,9 @@ def scene_base(u):
         if wf_b is not None and wf_b != wf_a:
             break
     log("亮度与水动画", "水自己在换帧：站着不动 wf 也会跳（覆写图集里那一格，不动网格）",
-        wf_a is not None and wf_b is not None and wf_a != wf_b and (wf_b or 9) <= 2,
+        # 帧号 0 是个合法值，别写 wf_b or 9 —— 那样 0 会被当成「读不到」，
+        # 这条判据就变成「三分之一概率自己把自己判红」。
+        wf_a is not None and wf_b is not None and wf_a != wf_b and wf_b <= 2,
         "wf %s → %s，等了 %.1f 秒。一共 3 帧、游戏里 500ms 一帧；软件渲染时 dt 被钳在 0.1，"
         "游戏里的钟比墙上的慢，所以按「最多等 8 秒看它跳不跳」判，不硬卡 1.4 秒" % (wf_a, wf_b, waited))
 
@@ -1058,6 +1076,87 @@ def scene_base(u):
     log("底栏与生存飞行", "飞着切回生存会落下来（模式不再是飞行）并且给一句话",
         "飞行" not in back and "飞行也停了" in str(hud_field(s, 7)),
         "切回后模式=%s 备注=%r" % (back, hud_field(s, 7)))
+
+    # ---------------- 潜行 / 疾跑 / 挖掘硬度 ----------------
+    s.ev("window.__T.keydown('ShiftLeft','Shift');")
+    time.sleep(0.45)
+    mode_sneak = str(hud_field(s, 2))
+    s.ev("window.__T.keyup('ShiftLeft','Shift');")
+    time.sleep(0.45)
+    mode_walk = str(hud_field(s, 2))
+    log("手感与挖掘", "按住 Shift 模式那格写潜行、松开写行走（Shift 从加速键改成了潜行键）",
+        "潜行" in mode_sneak and "潜行" not in mode_walk and "行走" in mode_walk,
+        "按住时=%s 松开=%s" % (mode_sneak, mode_walk))
+
+    def walk_dist(shift, secs=1.3):
+        """按住 W 往前走 secs 秒，回走过的水平距离（格）。两次都是同一条朝向。"""
+        k = "window.__T.keydown('KeyW','w');"
+        if shift:
+            k += "window.__T.keydown('ShiftLeft','Shift');"
+        p0 = pose(s)
+        s.ev(k)
+        time.sleep(secs)
+        s.ev("window.__T.keyup('KeyW','w');")
+        if shift:
+            s.ev("window.__T.keyup('ShiftLeft','Shift');")
+        time.sleep(0.4)
+        p1 = pose(s)
+        if not p0 or not p1:
+            return None
+        return ((p1[0] - p0[0]) ** 2 + (p1[2] - p0[2]) ** 2) ** 0.5
+
+    d_walk = walk_dist(False)
+    time.sleep(0.4)
+    d_sneak = walk_dist(True)
+    if d_walk and d_sneak is not None and d_walk > 0.4 and d_sneak > 0.05:
+        log("手感与挖掘", "潜行确实慢得多：同样一秒半走的距离不到正常走的六成",
+            d_sneak / d_walk < 0.62,
+            "正常走 %.2f 格，潜行 %.2f 格，比值 %.2f（目标是 0.35 上下）" % (d_walk, d_sneak, d_sneak / d_walk))
+    else:
+        log("手感与挖掘", "潜行确实慢得多", None,
+            "这一段路没走开（正常 %.3f、潜行 %s），这条不作数" %
+            (d_walk if d_walk is not None else -1.0,
+             "%.3f" % d_sneak if d_sneak is not None else "读不到"))
+
+    def place_once():
+        """右键放一个手里选中的方块，找一个放得下的俯角。放成了返回 True。"""
+        for dy in (0, -120, 120, -240):
+            if dy:
+                drag_look(s, W // 2, H // 2, dy)
+            a0 = changed_count(s)
+            click(s, W // 2, H // 2, 2)
+            if changed_count(s) > a0:
+                return True
+        return False
+
+    # 石头三下、草一下：自己放一块石头再挖，位置和方块种类都在我手里，不靠地形碰运气
+    s.ev("var c=document.querySelectorAll('#hot-cells .g-hot-cell'); if (c[2]) c[2].click();")
+    time.sleep(0.5)
+    placed = place_once()
+    c_place = changed_count(s)
+    click(s, W // 2, H // 2, 0)
+    time.sleep(0.4)
+    seg11_a, c_a = str(hud_field(s, 10)), changed_count(s)
+    click(s, W // 2, H // 2, 0)
+    time.sleep(0.4)
+    click(s, W // 2, H // 2, 0)
+    time.sleep(0.7)
+    c_b, seg11_b = changed_count(s), str(hud_field(s, 10))
+    log("手感与挖掘", "生存里石头不是点一下就碎：第一下只出进度、改动数不变",
+        bool(placed) and c_a == c_place and seg11_a.startswith("3:") and seg11_a.count(":") == 2,
+        "放了石头=%s 放完改动=%d 第一下后改动=%d 第 11 段=%r" % (placed, c_place, c_a, seg11_a))
+    log("手感与挖掘", "连点到第三下石头碎了（改动加一）而且进度条收掉",
+        c_b > c_a and seg11_b == "", "改动 %d→%d 第 11 段=%r" % (c_a, c_b, seg11_b))
+    set_mode('创造')
+    k0 = changed_count(s)
+    place_once()
+    k1 = changed_count(s)
+    click(s, W // 2, H // 2, 0)
+    time.sleep(0.6)
+    k2 = changed_count(s)
+    log("手感与挖掘", "创造模式还是一下就碎（硬度只作用在生存，别把创造也磨慢）",
+        k2 > k1 and str(hud_field(s, 10)) == "",
+        "放完改动=%d 挖一下之后=%d 第 11 段=%r" % (k1, k2, hud_field(s, 10)))
 
     errs = s.ev("return window.__T.errs();")
     log("桌面基础", "这一轮交互没有报错", not errs, "｜".join(errs[:3])[:160])
@@ -1241,12 +1340,18 @@ def scene_touch(u):
     else:
         log("手机端触摸", "视角转动方向和手指拖动方向一致", None, "读不到位姿")
 
+    dug1, taps_used = 0, 0
     for _ in range(3):
         n0 = changed_count(s)
-        tap(tid, right[0], right[1]); tid += 1
-        n1 = changed_count(s)
-        if n1 > n0:
-            dug1 = n1 - n0
+        n1 = n0
+        for _ in range(3):   # 生存有硬度：硬方块要连点，一下不碎不是 bug
+            tap(tid, right[0], right[1], after=0.5); tid += 1
+            taps_used += 1
+            n1 = changed_count(s)
+            if n1 > n0:
+                dug1 = n1 - n0
+                break
+        if dug1:
             break
         tid = look_drag(tid, 150)
     log("手机端触摸", "轻点一下只挖一格（旧版触屏还模拟鼠标 → 挖两下）", dug1 == 1,
@@ -1254,6 +1359,8 @@ def scene_touch(u):
     if not dug1:
         log("手机端触摸", "手机端准星一直对不到东西", False, "压了 %d 像素视角还挖不动" % total)
         return
+    log("手机端触摸", "触屏挖硬方块是连点加进度（一次只加一点，三下以内碎）",
+        dug1 == 1 and taps_used <= 3, "碎之前一共点了 %d 下" % taps_used)
 
     # 按住 0.7 秒：只该放一个方块，不该在抬手时再挖一次
     n0 = changed_count(s)
@@ -1447,7 +1554,7 @@ def scene_static(u):
         except OSError:
             return ""
 
-    RS, BK = src_of("main.rs"), src_of("blocks.rs")
+    RS, BK, PH = src_of("main.rs"), src_of("blocks.rs"), src_of("phys.rs")
     uv_decl = (re.search(r"varying \\w+ vec2 uv", RS) or ["", "读不到 main.rs"])[0] if RS else "读不到 main.rs"
     checks = [
         ("IndexedDB 打开有超时", re.search(r"rejectFn[\s\S]{0,400}?setTimeout|setTimeout[\s\S]{0,300}?rejectFn", L) is not None),
@@ -1530,6 +1637,19 @@ def scene_static(u):
          None if not RS else ("near_prev && g.creative" in RS), ""),
         ("切到生存会打断飞行（不然会悬在半空）",
          None if not RS else ("was_flying" in RS), ""),
+        ("手机上有个「潜行」按钮，loader 里是按住置位、松开清零（不是取走即清那种）",
+         'id="btn-sneak"' in I and "btn-sneak" in L and "mcl_sneak_held" in L and "pointerup" in L, ""),
+        ("Shift 改成潜行、疾跑挪给 Ctrl，两句提示文案跟着改了",
+         "Shift 潜行" in I and "Ctrl 疾跑" in I and "潜行按住" in I and "LeftControl" in RS, ""),
+        ("挖掘进度是准星下面一条小横杠：HTML 有元素、CSS 有样式、loader 读第 11 段",
+         'id="minebar"' in I and ".g-mine" in C and "parts[10]" in L and "minebar" in L, ""),
+        ("硬度与「要点几下」在 blocks.rs 里算出来（石头三下、草一下）",
+         None if not BK else ("pub fn hardness" in BK and "pub fn taps_to_break" in BK), ""),
+        ("防边缘和自动跳在 phys.rs 里，疾跑加成已经从 1.7 降到 1.35",
+         None if not PH else ("fn edge_ok" in PH and "fn auto_jump" in PH
+                              and "SNEAK_MULT" in PH and "SPRINT_MULT: f32 = 1.35" in PH), ""),
+        ("挖掘进度第 11 段是追加在最后面的（前面十段一个字没动，老页面还能读）",
+         None if not RS else ("{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}" in RS), ""),
     ]
     for item in checks:
         log("静态检查", item[0], item[1], item[2] if len(item) > 2 else "")

@@ -389,6 +389,26 @@ body {
   opacity: 0.85;
 }
 
+/* 挖掘进度：挂在准星正下方，就一条 46×5 的小横杠。HUD 那套信号色，不引新颜色。 */
+.g-mine {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 46px;
+  height: 5px;
+  margin: 14px 0 0 -23px;
+  background: rgba(16, 16, 16, 0.45);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);
+  pointer-events: none;
+}
+
+.g-mine-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--ef-signal, #fffa00);
+}
+
 .g-cross::before,
 .g-cross::after {
   content: "";

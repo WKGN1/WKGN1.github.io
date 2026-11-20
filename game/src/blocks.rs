@@ -70,6 +70,33 @@ pub fn is_transparent(id: u8) -> bool {
     id == AIR || id == WATER
 }
 
+/// 挖掉一格要「点几下」的原始硬度。数值来自 MC 公开的硬度表（那是事实，不是素材），
+/// 草 0.6 / 土 0.5 / 沙 0.5 / 石头 1.5 / 木头木板工作台 2.0 / 叶子雪 0.2 / 灯 0.3。
+/// 空气和水给 0：射线本来就穿水而过（水挖不到），0 也保证不会被点到。
+pub fn hardness(id: u8) -> f32 {
+    match id {
+        GRASS | SNOW_GRASS => 0.6,
+        DIRT | SAND => 0.5,
+        STONE => 1.5,
+        WOOD | PLANK | WORKBENCH => 2.0,
+        LEAF | SNOW => 0.2,
+        LAMP => 0.3,
+        _ => 0.0,
+    }
+}
+
+/// 把硬度换成「连点几下才碎」：`ceil(1.5 × 硬度)`，最少 1 下。这个映射是我们自己定的 ——
+/// 不是为了还原 MC 的挖掘秒数，是为了手机上「轻点 = 挖一下」这条手势一点不用改也能分出软硬：
+/// 石头三下、木头三下，草/土/沙/叶子/雪/玻璃一下。
+pub fn taps_to_break(id: u8) -> u8 {
+    let h = hardness(id);
+    if h <= 0.0 {
+        1
+    } else {
+        ((1.5 * h).ceil() as u8).max(1)
+    }
+}
+
 pub fn is_emissive(id: u8) -> bool {
     id == LAMP
 }
@@ -316,6 +343,27 @@ pub fn atlas_rgba() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 挖石头要连点三下而草一下就碎而且不许倒挂() {
+        assert_eq!(taps_to_break(GRASS), 1);
+        assert_eq!(taps_to_break(SNOW_GRASS), 1);
+        assert_eq!(taps_to_break(DIRT), 1);
+        assert_eq!(taps_to_break(SAND), 1);
+        assert_eq!(taps_to_break(LEAF), 1);
+        assert_eq!(taps_to_break(SNOW), 1);
+        assert_eq!(taps_to_break(LAMP), 1);
+        assert_eq!(taps_to_break(STONE), 3);
+        assert_eq!(taps_to_break(WOOD), 3);
+        assert_eq!(taps_to_break(PLANK), 3);
+        assert_eq!(taps_to_break(WORKBENCH), 3);
+        // 不许出现「石头比土还快」这种倒挂：硬的点的次数必须不少于软的
+        assert!(taps_to_break(STONE) >= taps_to_break(DIRT));
+        assert!(taps_to_break(WOOD) >= taps_to_break(GRASS));
+        // 空气和水不能被「挖」出进度来
+        assert_eq!(hardness(AIR), 0.0);
+        assert_eq!(hardness(WATER), 0.0);
+    }
 
     #[test]
     fn 水有三帧彼此不同而图集里那一格就是第零帧() {

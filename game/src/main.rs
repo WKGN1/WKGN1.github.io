@@ -47,6 +47,11 @@ const FOG_NEAR: f32 = 26.0;
 const FOG_FAR: f32 = 96.0;
 
 /// 每帧最多重建几个区块网格。启动时 36 个要建，分摊一下免得卡成一帧。
+/// 多久没继续点同一格，挖掘进度就作废（秒）。不设这条，挖石头挖了一半走开，
+/// 回来随手一下那一格就碎了。
+/// 多久没继续点同一格，挖掘进度就作废（秒）。1.2 太紧：手机上按节奏点两下、
+/// 中间随便停一下就被清了，等于硬方块永远挖不动。判据那边一次点击之间也要一秒多。
+const MINE_RESET_SECONDS: f32 = 2.0;
 const MESH_BUDGET: usize = 12;
 
 // ---------------------------------------------------------------------------
@@ -83,6 +88,9 @@ extern "C" {
     fn mcl_take_jump() -> i32;
     fn mcl_take_fly() -> i32;
     fn mcl_take_slot() -> i32;
+    /// 1 = 手机端 HUD 上那个「潜行」按钮**正被按着**（按住型：按着就一直给 1，松手变 0）。
+    /// 跟 jump 那种「取走即清」不一样：潜行是个状态，不是一下。
+    fn mcl_sneak_held() -> i32;
     /// 「物品栏」面板发来的命令：取走一条，队列空了返回 0。
     fn mcl_take_ui_cmd() -> i32;
     /// 告诉页面「世界建好了」：门面该收，HUD 该亮。
@@ -115,6 +123,18 @@ mod bridge {
 
     pub fn hud(text: &str) {
         send(text);
+    }
+
+    /// 手机端「潜行」按钮是否正被按着（桌面版永远 false，那边看键盘）。
+    pub fn sneak_held() -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            unsafe { mcl_sneak_held() != 0 }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            false
+        }
     }
 
     /// 只在从 Waiting 进 Running 的那一帧叫一次。
@@ -534,6 +554,12 @@ struct Game {
     bright: u8,
     /// 当前水帧 + 计时器。每 0.5 秒换一帧，只覆写图集里水那一格 16×16。
     water_frame: usize,
+    /// 生存挖掘进度：(正盯着哪一格, 还差几下点碎)。None = 没有进行中的挖掘。
+    mine: Option<([i32; 3], u8)>,
+    /// 那一格一共要几下。进度条要用它，存着是为了别让同一格的总下数在画面上跳来跳去。
+    mine_total: u8,
+    /// 距离「这进度该作废了」还剩几秒。
+    mine_clock: f32,
     water_clock: f32,
     time_of_day: f32,
     phase: Phase,
@@ -587,6 +613,9 @@ impl Game {
             atlas: None,
             bright: 0,
             water_frame: 0,
+            mine: None,
+            mine_total: 0,
+            mine_clock: 0.0,
             water_clock: 0.0,
         }
     }
@@ -650,11 +679,15 @@ impl Game {
         }
     }
 
-    /// 挖掉瞄准到的方块。
+    /// 挖掉瞄准到的方块。**生存**模式下按硬度算「还要点几下」：石头三下、草一下。
+    /// 手势一条没改 —— 电脑单击、手机轻点都还是「挖一下」，硬的东西多点几下，按住仍然是放；
+    /// 硬度只体现在要点几下上，不体现在按住不放上，所以手机上不会出现「轻点永远挖不动」。
+    /// **创造**一下就碎（真 MC 的创造也是这样，不然创造模式就没意义了）。
     fn mine(&mut self) {
         let eye = self.player.eye();
         let dir = self.player.look_dir();
         let Some(hit) = ray::cast(&self.world, eye, dir, REACH) else {
+            self.mine = None;
             return;
         };
         let [x, y, z] = hit.cell;
@@ -662,6 +695,33 @@ impl Game {
             return; // 第 0 层是世界底壳，挖穿就掉出去了
         }
         let id = self.world.get(x, y, z);
+        if b::is_air(id) {
+            self.mine = None;
+            return;
+        }
+        let total = b::taps_to_break(id);
+        if self.creative {
+            self.break_cell(x, y, z, id);
+            return;
+        }
+        // 同一格、而且那一格还是原来那种方块，才接着数；换了目标或被人换了方块就从头数
+        let left = match self.mine {
+            Some((cell, n)) if cell == [x, y, z] && self.world.get(x, y, z) == id => n,
+            _ => total,
+        };
+        if left <= 1 {
+            self.break_cell(x, y, z, id);
+            return;
+        }
+        self.mine = Some(([x, y, z], left - 1));
+        self.mine_total = total;
+        self.mine_clock = MINE_RESET_SECONDS;
+    }
+
+    /// 真把这一格清掉：清成空气、标脏（在 world.set 里）、生存掉料、进度抹平。
+    fn break_cell(&mut self, x: i32, y: i32, z: i32, id: u8) {
+        self.mine = None;
+        self.mine_total = 0;
         self.world.set(x, y, z, b::AIR);
         self.save_dirty = true;
         // 生存才掉料。创造挖了就是挖了，背包里那些格子永远是 0 个。
@@ -866,6 +926,8 @@ impl Game {
             "飞行"
         } else if self.player.in_water {
             "游泳"
+        } else if self.player.sneak {
+            "潜行"
         } else {
             "行走"
         };
@@ -916,8 +978,23 @@ impl Game {
             format!("×{}", sel.n)
         };
         let mode = format!("{}·{}", mode, if self.creative { "创造" } else { "生存" });
+        // 第 11 段：挖掘进度「哪种方块:点了几下:共需几下」。空串 = 没在挖（界面把准星下面
+        // 那条小横杠收掉）。新段永远加在最后，前 10 段一个字都没动，老页面照旧能读。
+        let mine_text = match self.mine {
+            Some((cell, left)) => {
+                let total = self.mine_total.max(1) as u32;
+                let done = total.saturating_sub(left as u32);
+                format!(
+                    "{}:{}:{}",
+                    self.world.get(cell[0], cell[1], cell[2]),
+                    done,
+                    total
+                )
+            }
+            None => String::new(),
+        };
         let text = format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.inv.selected_index() + 1,
             format!("{} {}", b::block_name(sel.id), held),
             mode,
@@ -928,7 +1005,8 @@ impl Game {
             note,
             pos,
             // 第 10 段：物品栏面板要的整份数据（里面一个 | 都没有，管子按 | 切段）
-            inv::inv_text(&self.inv, self.creative, self.bench_near())
+            inv::inv_text(&self.inv, self.creative, self.bench_near()),
+            mine_text
         );
         bridge::hud(&text);
     }
@@ -1375,13 +1453,32 @@ async fn main() {
 
             // 手机端没有键盘，跳全靠那排 DOM 按钮（触屏双击也能切飞行，见 read_touch）
             let jump = (is_key_down(KeyCode::Space) || btn_jump) && !game.paused;
-            let down_key = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
-            // 行走时 Shift 是加速，飞行时 Shift 是下降，两者不能同时生效。
-            let sprint = down_key && !game.player.fly;
+            // Shift 是**潜行**，Ctrl 才是疾跑 —— 以前 Shift 当加速键是我的偷懒写法。
+            // 真 MC 里 Shift 一直是潜行，而潜行有个要紧用处：走到边缘自己停住，
+            // 边走边挖不会一步步挪下悬崖（手机上没 Shift，所以 HUD 上那个按钮按住就算）。
+            let sneak = (is_key_down(KeyCode::LeftShift)
+                || is_key_down(KeyCode::RightShift)
+                || bridge::sneak_held())
+                && !game.paused;
+            let sprint =
+                (is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl))
+                    && !game.paused
+                    && !game.player.fly;
+            // 飞行的时候这个键是下降（真 MC 里下降用的也正是潜行键），所以照搬，不额外加键。
+            let descend = sneak && game.player.fly;
 
             game.time_of_day = (game.time_of_day + dt / DAY_SECONDS).rem_euclid(1.0);
             game.player
-                .update(&game.world, dt, wish, jump, down_key && !sprint, sprint);
+                .update(&game.world, dt, wish, jump, descend, sprint, sneak);
+
+            // 挖掘进度：一会儿不点同一格就作废
+            if game.mine.is_some() {
+                game.mine_clock -= dt;
+                if game.mine_clock <= 0.0 {
+                    game.mine = None;
+                    game.mine_total = 0;
+                }
+            }
 
             // 3) 自动存档：改动之后 3 秒写一次
             game.save_timer += dt;

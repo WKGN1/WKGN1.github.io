@@ -12,7 +12,11 @@ pub const EYE_HEIGHT: f32 = 1.62;
 pub const GRAVITY: f32 = -24.0;
 pub const JUMP_V: f32 = 8.4;
 pub const WALK_SPEED: f32 = 4.4;
-pub const SPRINT_MULT: f32 = 1.7;
+/// 疾跑加成。以前是 1.7（+70%）：电脑上还好，手机上单指按着摇杆跑这么快就是失控。
+/// 真 MC 只有 +30%（而且撞墙自动取消），降到这儿是照着它改的。
+pub const SPRINT_MULT: f32 = 1.35;
+/// 潜行速度。比正常走慢得多 —— 配合「走到边缘自己停」才是潜行该有的样子。
+pub const SNEAK_MULT: f32 = 0.35;
 pub const FLY_SPEED: f32 = 10.0;
 /// 水里下沉/上浮都变慢，浮力这个数值是「手感」调出来的，不是物理算出来的。
 pub const WATER_GRAVITY: f32 = -5.0;
@@ -28,6 +32,8 @@ pub struct Player {
     pub fly: bool,
     pub on_ground: bool,
     pub in_water: bool,
+    /// 这一帧是否在潜行（站着才算，飞着游着都不算）。界面上「行走」那格会写成「潜行」。
+    pub sneak: bool,
 }
 
 impl Player {
@@ -40,6 +46,7 @@ impl Player {
             fly: false,
             on_ground: false,
             in_water: false,
+            sneak: false,
         }
     }
 
@@ -62,6 +69,7 @@ impl Player {
         jump: bool,
         descend: bool,
         sprint: bool,
+        sneak: bool,
     ) {
         let dt = dt.min(0.05); // 切后台回来 dt 会很大，钳一下免得一步穿墙
 
@@ -74,11 +82,15 @@ impl Player {
         let waist = w.water_at(self.pos[0], self.pos[1] + 0.9, self.pos[2]);
         let head = w.water_at(self.pos[0], self.pos[1] + EYE_HEIGHT, self.pos[2]);
         self.in_water = foot || waist || head;
+        // 潜行只在站着的时候成立：飞着按 Shift 是下降、游着按是往上游，都不算蹲。
+        self.sneak = sneak && self.on_ground && !self.fly && !self.in_water;
 
         let want_speed = if self.fly {
             FLY_SPEED
         } else if self.in_water {
             WALK_SPEED * 0.55
+        } else if self.sneak {
+            WALK_SPEED * SNEAK_MULT
         } else {
             WALK_SPEED * if sprint { SPRINT_MULT } else { 1.0 }
         };
@@ -132,9 +144,32 @@ impl Player {
         let max_v = if self.fly { FLY_SPEED * 2.0 } else { MAX_FALL.abs() };
         self.vel[1] = self.vel[1].clamp(-max_v, max_v);
 
+        // 自动跳：手机上够不着跳键，往前走撞上一格高的坎就自己跳上去。潜行时不跳 ——
+        // 那会儿人的意思是「慢慢挪」，自动跳会把他蹦下崖去。
+        if self.on_ground && !self.fly && !self.in_water && !self.sneak {
+            self.auto_jump(w, wish);
+        }
+
         self.on_ground = false;
-        self.move_axis(w, self.vel[0] * dt, 0);
-        self.move_axis(w, self.vel[2] * dt, 2);
+        let dx = self.vel[0] * dt;
+        let dz = self.vel[2] * dt;
+        if self.sneak {
+            // 潜行防边缘：这一步走过去之后脚下要是没地板了，这一步直接取消（不是「走一半停下」，
+            // 是把位移抹掉、人贴回原位）。以前没这条，站在崖边按住前进会一点点挪下去。
+            if self.edge_ok(w, 0, dx) {
+                self.move_axis(w, dx, 0);
+            } else {
+                self.vel[0] = 0.0;
+            }
+            if self.edge_ok(w, 2, dz) {
+                self.move_axis(w, dz, 2);
+            } else {
+                self.vel[2] = 0.0;
+            }
+        } else {
+            self.move_axis(w, dx, 0);
+            self.move_axis(w, dz, 2);
+        }
         self.move_axis(w, self.vel[1] * dt, 1);
 
         if self.pos[1] < -20.0 {
@@ -233,6 +268,63 @@ impl Player {
         }
     }
 
+    /// 潜行用：按这个位移走过去之后，箱子底下还有没有东西托着。
+    fn edge_ok(&self, w: &World, axis: usize, delta: f32) -> bool {
+        if delta.abs() < 1e-7 {
+            return true;
+        }
+        let eps = 1e-4;
+        let mut min = [
+            self.pos[0] - P_HALF + eps,
+            self.pos[1],
+            self.pos[2] - P_HALF + eps,
+        ];
+        let mut max = [
+            self.pos[0] + P_HALF - eps,
+            self.pos[1] + P_HEIGHT - eps,
+            self.pos[2] + P_HALF - eps,
+        ];
+        min[axis] += delta;
+        max[axis] += delta;
+        let y = (min[1] - 0.06).floor() as i32;
+        let x0 = min[0].floor() as i32;
+        let x1 = max[0].floor() as i32;
+        let z0 = min[2].floor() as i32;
+        let z1 = max[2].floor() as i32;
+        for cz in z0..=z1 {
+            for cx in x0..=x1 {
+                if w.blocks_movement(cx, y, cz) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// 正面是一格高的坎、坎上面够站人 → 自己跳。方向拿走路意图算，不能拿速度：
+    /// 顶在墙上时速度早被贴边解算清成 0 了，方向还在手上。
+    fn auto_jump(&mut self, w: &World, wish: [f32; 3]) {
+        let len = (wish[0] * wish[0] + wish[2] * wish[2]).sqrt();
+        if len < 0.3 {
+            return;
+        }
+        let fx = wish[0] / len;
+        let fz = wish[2] / len;
+        // 探的点在箱子前沿外一点点，正好落在正要撞上的那一格里
+        let cx = (self.pos[0] + fx * (P_HALF + 0.12)).floor() as i32;
+        let cz = (self.pos[2] + fz * (P_HALF + 0.12)).floor() as i32;
+        let feet = self.pos[1].floor() as i32;
+        if !w.blocks_movement(cx, feet, cz) {
+            return; // 前面没东西挡着，不用跳
+        }
+        // 坎上面要能站人：脚那一格和头顶那一格都得空着，不然是两格高的墙，跳了也撞头
+        if w.blocks_movement(cx, feet + 1, cz) || w.blocks_movement(cx, feet + 2, cz) {
+            return;
+        }
+        self.vel[1] = JUMP_V;
+        self.on_ground = false;
+    }
+
     fn check_ground(&mut self, w: &World) {
         let y = (self.pos[1] - 0.06).floor() as i32;
         let x0 = (self.pos[0] - P_HALF).floor() as i32;
@@ -324,6 +416,92 @@ mod tests {
 
     /// 「向右拖 = 往右转」这条判据很硬：yaw 变大之后，原来正前方十格那个点必须跑到新画面的左边
     /// （往右转，画面里的东西才会往左滑）。顺便钉住输入那边的符号约定。
+    /// 造一小块干净的平地：把 (46..54, 18..26, 46..54) 腾空，y=20 铺一层石头。
+    /// 出生点那带是生成出来的地形，判「走到边缘停不停」需要一块说得清的地板。
+    fn 一小块平地() -> World {
+        let mut w = World::new(7);
+        // 先掏空一大块（x 到 60），再只在 x=46..53 铺地板：这样 54 往外是真悬空，
+        // 不是"生成的地形刚好还有石头接着"—— 第一版我就是栽在这儿，0.7 那一步本该悬空
+        // 却被生成出来的地形接住了，判据看着像错的，其实是我的实验台没搭干净。
+        for x in 46..60 {
+            for z in 46..54 {
+                for y in 18..26 {
+                    w.set(x, y, z, b::AIR);
+                }
+            }
+        }
+        for x in 46..54 {
+            for z in 46..54 {
+                w.set(x, 20, z, b::STONE);
+            }
+        }
+        w
+    }
+
+    #[test]
+    fn 潜行走完那一步脚下没地板了就不许走过去() {
+        let w = 一小块平地();
+        let mut p = Player::new([53.69, 21.0, 49.5]);
+        p.on_ground = true;
+        // 地板只到 x=53。小步（0.1）箱子还压在那格上，一大步（0.6）跨出去就悬空了
+        assert!(p.edge_ok(&w, 0, 0.1), "0.1 这一步该允许：箱子还压在 x=53 上");
+        // 0.6 那一步跨过去之后箱子还压着 x=53 那一格的 1 厘米边条（53.99），那也算有人托着；
+        // 要真悬空得 0.7 以上。别把判据写成一格整数那么干净，箱子是 0.6 宽的。
+        assert!(
+            p.edge_ok(&w, 0, 0.6),
+            "0.6 这一步箱子前沿还压在 x=53 那格上（差 1 厘米），该允许"
+        );
+        assert!(
+            !p.edge_ok(&w, 0, 0.7),
+            "0.7 这一步箱子整个到了 x=54 以外，脚下该没东西"
+        );
+        // 真走：潜行按住往前跑 40 帧，人不许越过地板边界掉下去
+        let mut q = Player::new([53.69, 21.0, 49.5]);
+        for _ in 0..40 {
+            q.update(&w, 0.05, [1.0, 0.0, 0.0], false, false, false, true);
+        }
+        assert!(
+            q.pos[1] > 20.5 && q.pos[0] < 54.5,
+            "潜行走 40 帧之后 x={:.3} y={:.3}：本该停在边上（半截探出去算有人托着，所以 x 到 54.3              左右是对的），不该掉下去",
+            q.pos[0],
+            q.pos[1]
+        );
+        // 同样的路不按潜行就该掉出去（证明这条判据真在起作用，不是我没测到）
+        let mut r = Player::new([53.69, 21.0, 49.5]);
+        for _ in 0..40 {
+            r.update(&w, 0.05, [1.0, 0.0, 0.0], false, false, false, false);
+        }
+        assert!(
+            r.pos[0] > 54.5,
+            "不按潜行 x={:.3} y={:.3}：同样的路该直接走出去，说明防边缘这条真在挡（对比潜行那条）",
+            r.pos[0],
+            r.pos[1]
+        );
+    }
+
+    #[test]
+    fn 自动跳只跳一格高坎不跳两格高的墙也不在潜行时跳() {
+        let mut w = 一小块平地();
+        w.set(51, 21, 49, b::STONE); // 一格高的坎，上面两格空着
+        let mut p = Player::new([50.6, 21.0, 49.5]);
+        p.on_ground = true;
+        p.auto_jump(&w, [1.0, 0.0, 0.0]);
+        assert!(
+            p.vel[1] > 0.0,
+            "前面是一格高的坎，自动跳该给一个向上的速度，拿到的是 {}",
+            p.vel[1]
+        );
+        w.set(51, 22, 49, b::STONE); // 再加一格：两格高的墙，跳了也撞头
+        let mut q = Player::new([50.6, 21.0, 49.5]);
+        q.on_ground = true;
+        q.auto_jump(&w, [1.0, 0.0, 0.0]);
+        assert_eq!(q.vel[1], 0.0, "两格高的墙不该自动跳");
+        // 潜行时不自动跳（update 里那条门槛），慢慢挪不会被蹦出去
+        let mut r = Player::new([50.6, 21.0, 49.5]);
+        r.update(&w, 0.05, [1.0, 0.0, 0.0], false, false, false, true);
+        assert!(r.vel[1] <= 0.0, "潜行往前顶不该自动跳，拿到的是 {}", r.vel[1]);
+    }
+
     #[test]
     fn 向右拖必须是往右转而不是往左转() {
         let up = vec3(0.0, 1.0, 0.0);
@@ -364,7 +542,7 @@ mod tests {
         let w = flat_world();
         let mut p = Player::new([40.5, 24.0, 40.5]);
         for _ in 0..200 {
-            p.update(&w, 1.0 / 60.0, [0.0, 0.0, 0.0], false, false, false);
+            p.update(&w, 1.0 / 60.0, [0.0, 0.0, 0.0], false, false, false, false);
         }
         assert!(p.on_ground, "200 帧后该落地了");
         assert!((p.pos[1] - 16.0).abs() < 0.05, "脚底高度 {}", p.pos[1]);
@@ -377,7 +555,7 @@ mod tests {
         let mut p = Player::new([40.5, 16.0, 40.5]);
         p.on_ground = true;
         for _ in 0..120 {
-            p.update(&w, 1.0 / 60.0, [0.0, 0.0, 1.0], false, false, false);
+            p.update(&w, 1.0 / 60.0, [0.0, 0.0, 1.0], false, false, false, false);
         }
         assert!(p.pos[2] > 41.0, "往前走了但没位移 {}", p.pos[2]);
         assert!(p.pos[2] < 60.0, "一步走太快 {}", p.pos[2]);
@@ -394,7 +572,7 @@ mod tests {
         for i in 0..150 {
             // 只按头 6 帧，之后松手：一直按着它会连跳，最后一帧可能正悬在半空
             let jump = i < 6;
-            p.update(&w, 1.0 / 60.0, [0.0, 0.0, 0.0], jump, false, false);
+            p.update(&w, 1.0 / 60.0, [0.0, 0.0, 0.0], jump, false, false, false);
             peak = peak.max(p.pos[1]);
         }
         assert!(peak > start + 0.8, "跳得太矮 {}", peak - start);
@@ -414,7 +592,7 @@ mod tests {
         let mut p = Player::new([45.5, 16.0, 40.5]);
         p.on_ground = true;
         for _ in 0..240 {
-            p.update(&w, 1.0 / 60.0, [1.0, 0.0, 0.0], false, false, true);
+            p.update(&w, 1.0 / 60.0, [1.0, 0.0, 0.0], false, false, true, false);
         }
         assert!(p.pos[0] < 50.0, "穿墙了 {}", p.pos[0]);
         assert!((p.pos[0] - (50.0 - P_HALF)).abs() < 0.02, "没贴住墙 {}", p.pos[0]);
@@ -426,7 +604,7 @@ mod tests {
         let mut p = Player::new([40.5, 30.0, 40.5]);
         p.fly = true;
         for _ in 0..120 {
-            p.update(&w, 1.0 / 60.0, [0.0, 0.0, 0.0], false, false, false);
+            p.update(&w, 1.0 / 60.0, [0.0, 0.0, 0.0], false, false, false, false);
         }
         assert!((p.pos[1] - 30.0).abs() < 0.01, "悬停却掉了 {}", p.pos[1]);
     }
