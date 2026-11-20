@@ -774,8 +774,26 @@ impl Game {
 
     /// 切创造 / 生存。切过去就把背包换成那个模式该有的一套：创造的数量永远是 0，
     /// 混着带进生存就成了「手里有 0 个的方块」，看着跟 bug 一样。
+    /// 飞行开关。**生存模式飞不了**（跟真 MC 一样：飞行是创造的能力，不是通用技巧）。
+    /// 三个入口都走这儿：电脑上的 F、HUD 上那个「飞」按钮、手机端的双击。
+    /// 双击那条不走这儿 —— 它在生存里要退化成「正常再挖一下」，见 read_touch。
+    fn toggle_fly(&mut self) {
+        if !self.creative {
+            self.set_note("生存模式飞不了，按 G 或开物品栏切到创造", NOTE_SECONDS);
+            return;
+        }
+        self.player.fly = !self.player.fly;
+        self.player.vel[1] = 0.0; // 切换瞬间别带着旧竖直速度乱窜
+    }
+
     fn toggle_creative(&mut self) {
+        let was_flying = self.player.fly;
         self.creative = !self.creative;
+        if !self.creative && was_flying {
+            // 切到生存还悬在半空会很怪：飞行是创造的能力，切过去就该掉下来。
+            self.player.fly = false;
+            self.player.vel[1] = 0.0;
+        }
         self.inv = if self.creative {
             inv::Inv::new_creative()
         } else {
@@ -785,6 +803,8 @@ impl Game {
         self.set_note(
             if self.creative {
                 "切到创造：随便挖随便放"
+            } else if was_flying {
+                "切到生存：挖了进背包，飞行也停了"
             } else {
                 "切到生存：挖了进背包，放下要扣"
             },
@@ -1076,10 +1096,14 @@ fn read_touch(g: &mut Game, dt: f32) -> Option<[f32; 3]> {
                             let near_prev = g.double_tap.map_or(false, |(t0, p0)| {
                                 g.uptime - t0 < 0.35 && (t.position - p0).length() < 60.0
                             });
-                            if near_prev {
+                            if near_prev && g.creative {
                                 g.double_tap = None;
-                                g.player.fly = !g.player.fly;
-                                g.player.vel[1] = 0.0; // 切换瞬间别带着旧竖直速度乱窜
+                                g.toggle_fly();
+                            } else if near_prev {
+                                // 生存里没有双击这个手势（飞行是创造的能力）。那就让它退化成
+                                // 正常再挖一下：手指连点两下就该挖两下，别给一次「什么也没发生」。
+                                g.double_tap = None;
+                                g.mine();
                             } else {
                                 g.double_tap = Some((g.uptime, t.position));
                                 g.mine();
@@ -1346,8 +1370,7 @@ async fn main() {
             }
 
             if (is_key_pressed(KeyCode::F) || btn_fly) && !game.paused {
-                game.player.fly = !game.player.fly;
-                game.player.vel[1] = 0.0;
+                game.toggle_fly();
             }
 
             // 手机端没有键盘，跳全靠那排 DOM 按钮（触屏双击也能切飞行，见 read_touch）

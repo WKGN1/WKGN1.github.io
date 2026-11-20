@@ -47,7 +47,6 @@
         <div class="g-hud" id="hud" hidden>
           <div class="g-hud-top">
             <div class="g-hud-line">
-              <span class="g-slot"><b id="hud-slot">1</b><span id="hud-block">草方块</span></span>
               <span class="g-kv"><i>模式</i><b id="hud-mode">等待</b></span>
               <span class="g-kv"><i>时刻</i><b id="hud-clock">06:00</b></span>
               <span class="g-kv"><i>改动</i><b id="hud-changed">0</b></span>
@@ -65,10 +64,17 @@
             <!-- Rust 推的第 8 段：飞行提示之类。空的时候这边会把它收掉，别挂个空块 -->
             <div class="g-hud-note" id="hud-note">正在读本地 IndexedDB</div>
             <div class="g-hint" id="hint-desktop">
-              W前进 S后退 A左 D右 · 移动鼠标转向 · 左键挖 · 右键放 · 1-9 换方块 · E 物品栏 · G 创造/生存 · B 亮度 · F 飞行 · Shift 加速 · 空格 跳 · 全屏
+              W前进 S后退 A左 D右 · 移动鼠标转向 · 左键挖 · 右键放 · 1-9 换方块 · E 物品栏 · G 创造/生存 · B 亮度 · F 飞行(仅创造) · Shift 加速 · 空格 跳 · 全屏
             </div>
             <div class="g-hint" id="hint-touch" hidden>
-              左半屏拖=走 · 右半屏拖=转向（跟手指同向） · 点一下=挖 · 按住=放 · 双击=飞行 · 跳/飞用上面那排按钮 · 物品栏里点着换方块 · 全屏（自动横屏）
+              左半屏拖=走 · 右半屏拖=转向（跟手指同向） · 点一下=挖 · 按住=放 · 双击=飞行(仅创造) · 跳/飞用上面那排按钮 · 物品栏里点着换方块 · 全屏（自动横屏）
+            </div>
+            <!-- 快捷栏：贴着画面下边缘，所以排在最后面（操作提示在它上面）。
+                 手机上手指往下够得着就是它；点一下就换手里那种方块。
+                 手里那种方块的名字（HUD 第 2 段）原来挂在左上角，跟格子分开两地不如挨着。 -->
+            <div class="g-hot" id="hotbar">
+              <div class="g-hot-held" id="hot-held">草方块 ∞</div>
+              <div class="g-hot-cells" id="hot-cells"></div>
             </div>
           </div>
         </div>

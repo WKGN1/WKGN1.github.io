@@ -853,6 +853,33 @@ function invCells(f, names, key, from, to, sel, creative) {
   return out;
 }
 
+// 底下那条快捷栏：同一份数据（HUD 第 10 段），跟物品栏面板不会各算各的。
+// 只有色块和数量，名字在格子上面那一行 —— 9 格要挤进手机宽度，塞不下名字。
+function hotCells(f, sel, creative) {
+  var out = '';
+  var slots = String(f.H || '').split(',');
+  for (var i = 0; i < 9; i++) {
+    var pair = String(slots[i] || '0:0').split(':');
+    var id = pair[0] | 0;
+    var n = pair[1] | 0;
+    var empty = id === 0 || (!creative && n === 0);
+    out += '<button class="g-hot-cell" type="button" data-slot="' + i + '"' +
+      (i === sel ? ' data-sel="1"' : '') + '>' +
+      '<i class="g-hot-chip" style="' + (empty ? '' : 'background:' + (BLOCK_COLOR[id] || '#999')) + '"></i>' +
+      '<b class="g-hot-n">' + (empty ? '' : (creative ? '∞' : n)) + '</b></button>';
+  }
+  return out;
+}
+
+var hotLast = '';
+function renderHot() {
+  var box = $('hot-cells');
+  if (!box || hotLast === invText) return;   // 没变就别碰 DOM（跟面板一条路子）
+  hotLast = invText;
+  var f = parseInv(invText);
+  box.innerHTML = hotCells(f, (f.S | 0) - 1, f.C === '1');
+}
+
 function invRecipes(f, names) {
   var recs = String(f.R || '').split(',');
   var can = String(f.A || '').split(',');
@@ -921,7 +948,7 @@ function toggleInv() { setInv(!invOpen); }
 window.__MCL_GIVE = function (id, n) { uiCmd(6000 + ((id | 0) * 100) + (n | 0)); return 1; };
 window.__MCL_INV_OPEN = function (on) { setInv(!!on); return invOpen ? 1 : 0; };
 
-var HUD_IDS = ['hud-slot', 'hud-block', 'hud-mode', 'hud-clock', 'hud-changed', 'hud-fps', 'hud-save', 'hud-note'];
+var HUD_IDS = [null, 'hot-held', 'hud-mode', 'hud-clock', 'hud-changed', 'hud-fps', 'hud-save', 'hud-note'];
 var hudLast = {};
 
 function tickHud() {
@@ -930,6 +957,7 @@ function tickHud() {
   var parts = String(raw).split('|');
   for (var i = 0; i < HUD_IDS.length; i++) {
     var id = HUD_IDS[i];
+    if (!id) continue;   // 第 1 段（第几格）不单独写了：底下快捷栏哪格亮着就是第几格
     var v = parts[i];
     if (v == null) continue;
     if (hudLast[id] === v) continue; // 没变就别碰 DOM：帧率那格每 0.2 秒重写一次纯属白刷，
@@ -945,6 +973,7 @@ function tickHud() {
   if (it != null && it !== invText) {
     invText = String(it);
     if (invOpen) renderInv();
+    renderHot();   // 底下那条快捷栏跟着同一份数据刷（面板关着也得刷，它一直在画面上）
   }
 }
 
@@ -1460,6 +1489,17 @@ function wireButtons() {
 
   // 亮度：三档，切了就发命令 410+n，曲线在着色器那边（u_bright）。
   // 存 localStorage 不进存档 —— 这是显示偏好，换台设备该跟着浏览器走，不该跟着世界走。
+  var hot = $('hot-cells');
+  if (hot && hot.addEventListener) hot.addEventListener('click', function (ev) {
+    var t = ev && ev.target ? ev.target : null;
+    // 点在里面那个色块 / 数字上也算点这一格，所以要往上找到带 data-slot 的那层
+    while (t && t !== hot && !(t.getAttribute && t.getAttribute('data-slot'))) t = t.parentNode;
+    if (!t || !t.getAttribute) return;
+    var i = parseInt(t.getAttribute('data-slot'), 10);
+    if (i >= 0 && i < 9) uiCmd(i + 1);   // 命令号 1..9 = 选第几格，规则在 Rust 那边
+  }, false);
+  renderHot();
+
   var bb = $('btn-bright');
   if (bb && bb.addEventListener) bb.addEventListener('click', function () { setBright(brightLevel + 1); }, false);
   brightLabel();

@@ -1,6 +1,6 @@
 {
-  "wasm": "mc-lite.94d369ed2a.wasm",
-  "bytes": 555986,
-  "gzip": 187444,
+  "wasm": "mc-lite.95b8712ddc.wasm",
+  "bytes": 556248,
+  "gzip": 187621,
   "note": "wasm 本体体积；站点上浏览器还会再压一次，实际传输看 gzip/brotli"
 }

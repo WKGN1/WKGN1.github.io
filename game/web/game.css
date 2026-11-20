@@ -244,6 +244,81 @@ body {
 }
 
 /* Rust 推的第 8 段（飞行提示之类）。空的时候 JS 会把它 hidden 掉，不留空块。 */
+/* 快捷栏：贴着画面下边缘。HUD 整体是 pointer-events:none，这一坨要单独开回来才能点。
+   9 格得在 390 宽的手机上排得下，所以每格给的是「能缩的下限」而不是一口价宽度。 */
+.g-hot {
+  pointer-events: auto;
+  align-self: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+  max-width: 100%;
+  touch-action: manipulation;
+}
+
+.g-hot-held {
+  align-self: center;
+  font-size: var(--ef-t-field, 0.8125rem);
+  font-weight: 700;
+  color: var(--ef-ink, #161616);
+  background: color-mix(in srgb, var(--ef-panel, #fff) 84%, transparent);
+  padding: 0.14rem 0.5rem;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.g-hot-cells {
+  display: flex;
+  justify-content: center;
+  gap: 0.22rem;
+}
+
+.g-hot-cell {
+  font: inherit;
+  font-family: var(--ef-font-ui, sans-serif);
+  position: relative;
+  flex: 1 1 0;
+  min-width: 2.05rem;   /* 9 格 + 缝 ≈ 330px，390 宽的手机排得下 */
+  max-width: 3.4rem;
+  min-height: 2.5rem;
+  padding: 0;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  background: color-mix(in srgb, var(--ef-panel, #fff) 84%, transparent);
+  border: 1px solid var(--ef-rule, #d9d9d6);
+}
+
+/* 选中那格用 HUD 自己那套「信号色」，跟左上角原来那一格同一套语言，不引新颜色 */
+.g-hot-cell[data-sel="1"] {
+  border: 2px solid var(--ef-signal, #fffa00);
+  background: color-mix(in srgb, var(--ef-signal, #fffa00) 24%, var(--ef-panel, #fff));
+}
+
+.g-hot-cell:active {
+  border-color: var(--ef-signal, #fffa00);
+}
+
+.g-hot-chip {
+  display: block;
+  height: 1.05rem;
+  margin: 0.18rem 0.18rem 0;
+  border: 1px solid rgba(0, 0, 0, 0.3);
+}
+
+.g-hot-n {
+  position: absolute;
+  right: 0.24rem;
+  bottom: 0.1rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--ef-ink, #161616);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
 .g-hud-note {
   align-self: flex-start;
   font-size: var(--ef-t-field, 0.8125rem);

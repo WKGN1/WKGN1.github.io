@@ -502,11 +502,13 @@ def scene_base(u):
     log("桌面基础", "兜底没露出", s.ev("return window.__T.vis('fallback');") == "hidden")
     hud = s.ev("return window.__MCL_HUD;")
     log("桌面基础", "HUD 有 10 段（第 10 段是物品栏的数据）（第 10 段是给我的调试位姿）", len(hud.split("|")) == 10, hud)
-    dom = s.ev("return ['hud-slot','hud-block','hud-mode','hud-clock','hud-changed','hud-fps','hud-save','hud-note']"
+    # 第 1 段（第几格）现在只以「底栏哪格亮着」的形式存在，不再写文字；第 2 段（手里那种）
+    # 挪到了底栏上面那一行。所以这儿从第 2 段起对，一共七格。
+    dom = s.ev("return ['hot-held','hud-mode','hud-clock','hud-changed','hud-fps','hud-save','hud-note']"
                ".map(function(i){ var e=document.getElementById(i); return e ? e.textContent : '(没有这个元素)'; });")
     parts = hud.split("|")
-    names = ["槽位", "方块", "模式", "时刻", "改动", "帧率", "存档", "备注"]
-    diff = [(nm, "wasm=%r" % w, "页面=%r" % d) for nm, w, d in zip(names, parts[:8], dom)
+    names = ["手里", "模式", "时刻", "改动", "帧率", "存档", "备注"]
+    diff = [(nm, "wasm=%r" % w, "页面=%r" % d) for nm, w, d in zip(names, parts[1:8], dom)
             if nm != "时刻" and d != w and not (w == "" and d == "")]
     log("桌面基础", "HUD 其余七格真的写进了页面（不是只有 wasm 在推）", len(diff) == 0,
         ("对不上的：%s" % diff if diff else "七格全对得上"))
@@ -988,6 +990,75 @@ def scene_base(u):
     s.ev("window.__MCL_SET_BRIGHT(0);")
     time.sleep(0.4)
 
+    # ---------------- 屏幕底下那条快捷栏 + 生存不能飞 ----------------
+    hot = s.ev("""return (function(){
+      var box = document.getElementById('hot-cells'); if (!box) return {count:-1};
+      var cells = box.querySelectorAll('.g-hot-cell');
+      var sel = -1;
+      for (var i = 0; i < cells.length; i++) if (cells[i].getAttribute('data-sel') === '1') sel = i;
+      var fr = document.querySelector('.g-frame').getBoundingClientRect();
+      var r = box.getBoundingClientRect();
+      return {count: cells.length, sel: sel,
+              fromTop: Math.round(r.top - fr.top), fromBottom: Math.round(fr.bottom - r.bottom),
+              fh: Math.round(fr.height)};
+    })();""")
+    sel0 = hud_field(s, 0)
+    ok_pos = isinstance(hot, dict) and hot.get("fh", 0) > 0 and \
+        hot.get("fromBottom", 9999) < hot["fh"] * 0.35 and hot.get("fromTop", 0) > hot["fh"] * 0.5
+    log("底栏与生存飞行", "快捷栏在屏幕下边缘：9 格、离底边不到画面高的 35%、且在下半屏",
+        hot.get("count") == 9 and ok_pos, "格子数=%s 距顶=%s 距底=%s 画面高=%s" %
+        (hot.get("count"), hot.get("fromTop"), hot.get("fromBottom"), hot.get("fh")))
+    log("底栏与生存飞行", "亮着的那一格就是 HUD 第 1 段说的那一格（不用文字也说得出）",
+        isinstance(sel0, str) and sel0.isdigit() and hot.get("sel") == int(sel0) - 1,
+        "第 1 段=%s 亮在第 %s 格" % (sel0, hot.get("sel")))
+
+    s.ev("document.querySelectorAll('#hot-cells .g-hot-cell')[2].click();")
+    time.sleep(0.7)
+    hot2 = s.ev("""return (function(){var c=document.querySelectorAll('#hot-cells .g-hot-cell');
+      var sel=-1; for (var i=0;i<c.length;i++) if (c[i].getAttribute('data-sel')==='1') sel=i;
+      return sel;})();""")
+    log("底栏与生存飞行", "点底栏第 3 格就换了手里的方块（第 1 段跟着变 3）",
+        hud_field(s, 0) == "3" and hot2 == 2, "第 1 段=%s 亮在第 %s 格" % (hud_field(s, 0), hot2))
+    s.ev("document.querySelectorAll('#hot-cells .g-hot-cell')[0].click();")
+    time.sleep(0.4)
+
+    # 生存模式飞不了（三个入口：F、HUD 那个「飞」按钮、触屏双击）。先确认现在是生存。
+    def set_mode(want):
+        """want = '创造' 或 '生存'。走面板里那个按钮，跟玩家点的是同一条路。"""
+        s.ev("window.__MCL_INV_OPEN(1);")
+        time.sleep(0.5)
+        if want not in str(hud_field(s, 2)):
+            s.ev("document.getElementById('inv-mode').click();")
+            time.sleep(0.6)
+        s.ev("window.__MCL_INV_OPEN(0);")
+        time.sleep(0.4)
+        return str(hud_field(s, 2))
+
+    m_sur = set_mode('生存')
+    s.ev("window.__T.keydown('KeyF','f');")
+    time.sleep(0.35)
+    s.ev("window.__T.keyup('KeyF','f');")
+    time.sleep(0.5)
+    after_f = str(hud_field(s, 2))
+    note_f = str(hud_field(s, 7))
+    log("底栏与生存飞行", "生存模式按 F 不起飞（模式里不会出现「飞行」）", "飞行" not in after_f,
+        "模式=%s" % after_f)
+    log("底栏与生存飞行", "按了也给一句话说明为什么不能飞", "生存模式飞不了" in note_f, "备注=%r" % note_f)
+
+    set_mode('创造')
+    s.ev("window.__T.keydown('KeyF','f');")
+    time.sleep(0.35)
+    s.ev("window.__T.keyup('KeyF','f');")
+    time.sleep(0.5)
+    fly_mode = str(hud_field(s, 2))
+    fly_on = "飞行" in fly_mode
+    back = set_mode('生存')
+    log("底栏与生存飞行", "创造里能飞（不然这条改动就是把功能砍没了）", fly_on,
+        "按完那一刻模式=%s（这条打的是按完当时，切回生存之后又变回步行了）" % fly_mode)
+    log("底栏与生存飞行", "飞着切回生存会落下来（模式不再是飞行）并且给一句话",
+        "飞行" not in back and "飞行也停了" in str(hud_field(s, 7)),
+        "切回后模式=%s 备注=%r" % (back, hud_field(s, 7)))
+
     errs = s.ev("return window.__T.errs();")
     log("桌面基础", "这一轮交互没有报错", not errs, "｜".join(errs[:3])[:160])
 
@@ -1439,6 +1510,26 @@ def scene_static(u):
         ("水有三帧、运行时只覆写图集里那一格（不动网格、不重建 chunk）",
          None if (not RS or not BK) else ("WATER_FRAMES" in BK and "water_frame_rgba" in BK
                                           and "update_part" in RS), ""),
+        ("快捷栏挂在 .g-hud-bottom 那一格里（也就是画面下边缘），不是在顶上",
+         'id="hotbar"' in I and 'id="hot-cells"' in I
+         and 'class="g-hud-bottom"' in I
+         and I.index('id="hotbar"') > I.index('class="g-hud-bottom"'),
+         "底栏在 HTML 里的位置：hotbar 在第 %d 字符，g-hud-bottom 容器在第 %d 字符"
+         % (I.index('id="hotbar"') if 'id="hotbar"' in I else -1,
+            I.index('class="g-hud-bottom"') if 'class="g-hud-bottom"' in I else -1)),
+        ("快捷栏每格是能点的按钮，宽度按手机窄屏算（9 格 + 缝 ≈ 330 像素）",
+         ".g-hot-cell" in C and "min-width: 2.05rem" in C and "data-slot" in L, ""),
+        ("底栏跟物品栏面板吃同一份数据（HUD 第 10 段），不会两边各算各的",
+         "renderHot" in L and "parseInv(invText)" in L, ""),
+        ("左上角不再有重复的「第几格 + 方块名」那两格（挪到底栏去了）",
+         'class="g-slot"' not in I and "hud-slot" not in L, ""),
+        ("飞行只在创造能用，三个入口都走同一个判断（不是散在各处各挡一次）",
+         None if not RS else ("fn toggle_fly" in RS and "game.toggle_fly()" in RS
+                              and "g.toggle_fly()" in RS and "生存模式飞不了" in RS), ""),
+        ("生存里没有双击手势：连点两下退化成正常挖两下（不给「什么也没发生」）",
+         None if not RS else ("near_prev && g.creative" in RS), ""),
+        ("切到生存会打断飞行（不然会悬在半空）",
+         None if not RS else ("was_flying" in RS), ""),
     ]
     for item in checks:
         log("静态检查", item[0], item[1], item[2] if len(item) > 2 else "")
