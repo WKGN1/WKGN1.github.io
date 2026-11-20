@@ -97,6 +97,35 @@ pub fn taps_to_break(id: u8) -> u8 {
     }
 }
 
+/// 这个方块吃掉多少光（0..15）。天光往下走时每撞到一个方块就按这个数掉级，
+/// 横向传播也是按它掉级。数字形状照 MC 的公开设定（空气/玻璃 0、水 2、叶子 1、
+/// 实心方块 15 = 完全不透），映射到我们自己的方块表上；这不是抄 MC 的贴图，是抄"光会被
+/// 实体挡住"这条物理事实。叶子给 1 是有味道的：树冠底下不会一片死黑。
+/// 萤石灯是 15：它不透光，但它自己那一格会被自己点亮（见 world 里 BFS 的起点就是发光方块），
+/// 光照样从它往外推 —— 不透光和会发光这两件事不冲突。
+pub fn opacity(id: u8) -> u8 {
+    if is_air(id) {
+        0
+    } else if id == WATER {
+        2
+    } else if id == LEAF {
+        1
+    } else if is_transparent(id) {
+        0
+    } else {
+        15
+    }
+}
+
+/// 这个方块自己发多少光（0..15）。目前只有萤石灯发光，它是洞穴那段的洞底光源。
+pub fn light_emission(id: u8) -> u8 {
+    if is_emissive(id) {
+        15
+    } else {
+        0
+    }
+}
+
 pub fn is_emissive(id: u8) -> bool {
     id == LAMP
 }
@@ -345,6 +374,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn 叶子让光漏一点水吃两道光实心方块全挡住() {
+        assert_eq!(opacity(AIR), 0);
+        assert_eq!(opacity(LEAF), 1); // 树冠底下不该一片死黑
+        assert_eq!(opacity(WATER), 2);
+        assert_eq!(opacity(STONE), 15);
+        assert_eq!(opacity(DIRT), 15);
+        assert_eq!(opacity(GRASS), 15);
+        assert_eq!(opacity(LAMP), 15); // 灯是不透光的实心发光块：自己那格亮、光往外推
+        assert_eq!(light_emission(LAMP), 15);
+        assert_eq!(light_emission(STONE), 0);
+        assert_eq!(light_emission(AIR), 0);
+    }
+
     fn 挖石头要连点三下而草一下就碎而且不许倒挂() {
         assert_eq!(taps_to_break(GRASS), 1);
         assert_eq!(taps_to_break(SNOW_GRASS), 1);

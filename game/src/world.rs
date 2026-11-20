@@ -19,9 +19,23 @@ pub const CHUNK_COUNT: usize = (CHUNKS_X * CHUNKS_Z) as usize;
 
 pub const WATER_LEVEL: i32 = 15;
 
+/// 六个邻居方向。光照 BFS 用它摊光：方向少一个，屋里就会出现一条永远不亮的缝。
+const NEIGH: [[i32; 3]; 6] = [
+    [1, 0, 0],
+    [-1, 0, 0],
+    [0, 1, 0],
+    [0, -1, 0],
+    [0, 0, 1],
+    [0, 0, -1],
+];
+
 pub struct World {
     pub seed: u32,
     pub data: Vec<u8>,
+    /// 一字节两截光照：高 4 位 = 天光（0..15），低 4 位 = 方块光（0..15）。
+    /// **不进存档**：它完全能由方块推出来，读档之后整张重算一遍就行，省下半个存档体积，
+    /// 也省掉「存档里的光照和方块对不上」这类脏状态。
+    pub light: Vec<u8>,
     /// 每个网格的脏标记：挖/放方块后只要重建这一格（跨边界时多带一格）。
     pub dirty: Vec<bool>,
     pub changed: u32,
@@ -42,10 +56,12 @@ impl World {
         let mut w = World {
             seed,
             data: vec![AIR; SX as usize * SY as usize * SZ as usize],
+            light: vec![0; SX as usize * SY as usize * SZ as usize],
             dirty: vec![true; CHUNK_COUNT],
             changed: 0,
         };
         w.generate();
+        w.relight_all();
         w
     }
 
@@ -64,12 +80,16 @@ impl World {
                 changed += 1;
             }
         }
-        Some(World {
+        let mut w = World {
             seed,
             data,
+            light: vec![0; SX as usize * SY as usize * SZ as usize],
             dirty: vec![true; CHUNK_COUNT],
             changed,
-        })
+        };
+        // 光照没存进存档，读档之后现推一遍（不然第一帧整个世界是黑的）
+        w.relight_all();
+        Some(w)
     }
 
     #[inline]
@@ -79,6 +99,220 @@ impl World {
         }
         self.data[idx(x, y, z)]
     }
+
+    /// 某一格的天光等级（0..15）。世界外一律 0：洞里不该「凭空气」透进光。
+    #[inline]
+    pub fn sky_light(&self, x: i32, y: i32, z: i32) -> u8 {
+        if y >= SY {
+            return 15; // 世界顶上就是露天：最上面那一层的顶面不该是黑的
+        }
+        if !in_bounds(x, y, z) {
+            return 0;
+        }
+        self.light[idx(x, y, z)] >> 4
+    }
+
+    /// 某一格的方块光等级（0..15）。
+    #[inline]
+    pub fn block_light(&self, x: i32, y: i32, z: i32) -> u8 {
+        if !in_bounds(x, y, z) {
+            return 0;
+        }
+        self.light[idx(x, y, z)] & 15
+    }
+
+    /// 整张重算光照。挖一格、放一格之后就叫这一条：整张图才 44 万格，release 下几毫秒就完，
+    /// 比「只重算附近一小盒、还得处理光源被挖掉时外面残留的亮光」那套便宜得多，
+    /// 而且不会算错（那套的残留是我以后一定会踩的坑）。
+    pub fn relight_all(&mut self) {
+        let n = self.data.len();
+        self.light.clear();
+        self.light.resize(n, 0);
+
+        // 1) 天光：从上往下扫每一列。头顶一整列都不挡光就一路 15 不掉级（真 MC 也是这条；
+        //    不然露天会平白无故带一层渐变）。撞上挡光的方块就按它的透明度掉级，掉到 0 之后
+        //    剩下靠横向摊（第 2 步）。
+        for z in 0..SZ {
+            for x in 0..SX {
+                let mut lvl: i32 = 15;
+                for y in (0..SY).rev() {
+                    let i = idx(x, y, z);
+                    let op = b::opacity(self.data[i]) as i32;
+                    if op >= 15 {
+                        lvl = 0;
+                    } else if lvl == 15 && op == 0 {
+                        // 满级天光从全透明的头顶直接漏下来，不掉级
+                    } else {
+                        lvl = (lvl - op.max(1)).max(0);
+                    }
+                    self.light[i] = (lvl as u8) << 4;
+                }
+            }
+        }
+
+        // 2) 两趟 BFS：一趟把天光横向摊开，一趟从发光的方块往外摊方块光。
+        //    规则都是「比已经记的更亮才写，写过就再往里推」，所以队列顺序不对也不会算错，
+        //    只是多推几步 —— 我故意不用有序队列，少一层容易写错的东西。
+        let mut sky_seeds: Vec<usize> = Vec::new();
+        let mut blk_seeds: Vec<usize> = Vec::new();
+        for i in 0..self.light.len() {
+            if self.light[i] >> 4 > 0 {
+                sky_seeds.push(i);
+            }
+            let e = b::light_emission(self.data[i]);
+            if e > 0 {
+                // 光源自己那一格直接给满级，哪怕它自己是不透光的实心块（不然灯里面是黑的）
+                self.light[i] = (self.light[i] & 0xF0) | e;
+                blk_seeds.push(i);
+            }
+        }
+        self.flood(true, sky_seeds, 0, SX - 1, 0, SZ - 1);
+        self.flood(false, blk_seeds, 0, SX - 1, 0, SZ - 1);
+    }
+
+    /// 光照摊开（BFS）。`sky=true` 摊天光、否则摊方块光；`seeds` 是起点格子；
+    /// 只允许改 x0..=x1 / z0..=z1 这几列（竖直方向全取），盒子外的格子值一律当已知、当光源喂进来。
+    /// 规则：「比已经记的更亮才写，写过就再往里推」，所以起点顺序错了也不会算错，只是多推几步
+    /// —— 我故意不用有序队列，少一层容易写错、以后也难查的东西。
+    fn flood(&mut self, sky: bool, seeds: Vec<usize>, x0: i32, x1: i32, z0: i32, z1: i32) {
+        let mut q: Vec<usize> = seeds;
+        let mut head = 0usize;
+        while head < q.len() {
+            let i = q[head];
+            head += 1;
+            let byte = self.light[i];
+            let lvl = if sky {
+                (byte >> 4) as i32
+            } else {
+                (byte & 15) as i32
+            };
+            if lvl <= 1 {
+                continue; // 1 级再往外推就是 0，白跑
+            }
+            let x = (i % SX as usize) as i32;
+            let rest = i / SX as usize;
+            let z = (rest % SZ as usize) as i32;
+            let y = (rest / SZ as usize) as i32;
+            for d in NEIGH.iter() {
+                let (nx, ny, nz) = (x + d[0], y + d[1], z + d[2]);
+                if !in_bounds(nx, ny, nz) || nx < x0 || nx > x1 || nz < z0 || nz > z1 {
+                    continue; // 盒子外面不动：那些格子的值本来就是对的
+                }
+                let j = idx(nx, ny, nz);
+                let op = b::opacity(self.data[j]) as i32;
+                if op >= 15 {
+                    continue; // 实心方块不收光
+                }
+                let nl = (lvl - 1 - op).max(0) as u8;
+                let cur = if sky {
+                    self.light[j] >> 4
+                } else {
+                    self.light[j] & 15
+                };
+                if nl > cur {
+                    self.light[j] = if sky {
+                        (self.light[j] & 15) | (nl << 4)
+                    } else {
+                        (self.light[j] & 0xF0) | nl
+                    };
+                    q.push(j);
+                }
+            }
+        }
+    }
+
+    /// 挖一格 / 放一格之后要重算的那一小坨：整根柱子重扫 + 半径 15 的盒子里重摊。
+    /// 为什么半径 15 就够、而且不会算错：光最远只能走 15 步（每步至少掉 1 级），
+    /// 所以离改动点 16 格以外的格子不可能被这次改动影响到，盒外的值当已知是对的。
+    /// 唯一能"无限远"影响的是天光 —— 它沿自己那根柱子往下不掉级，所以我把改动点那一整根
+    /// 柱子（竖直 48 格全取）重扫一遍，其它列的扫列结果不会因这一格变。
+    pub fn relight_around(&mut self, x: i32, _y: i32, z: i32) {
+        const R: i32 = 15;
+        let x0 = (x - R).max(0);
+        let x1 = (x + R).min(SX - 1);
+        let z0 = (z - R).max(0);
+        let z1 = (z + R).min(SZ - 1);
+
+        // 1) 盒内的光照全清（两截都清），然后把盒内每一列的天光重新扫一遍。
+        //    扫列只花 48 次/列，比"只扫改动那一根、别的列指望 BFS 补"干净。
+        for cz in z0..=z1 {
+            for cx in x0..=x1 {
+                let mut lvl: i32 = 15;
+                // 先把这根柱子（含盒外那些 y）清一遍再扫：盒子竖直方向是全取的，没有遗漏
+                for y in 0..SY {
+                    self.light[idx(cx, y, cz)] = 0;
+                }
+                for y in (0..SY).rev() {
+                    let i = idx(cx, y, cz);
+                    let op = b::opacity(self.data[i]) as i32;
+                    if op >= 15 {
+                        lvl = 0;
+                    } else if lvl == 15 && op == 0 {
+                        // 满级天光从全透明的头顶直接漏下来，不掉级
+                    } else {
+                        lvl = (lvl - op.max(1)).max(0);
+                    }
+                    self.light[i] = (lvl as u8) << 4;
+                }
+            }
+        }
+
+        // 2) 起点：盒内所有还亮着的天光格子 + 紧贴盒子外面一圈亮着的外来光（它们不许被改，
+        //    但要把光喂进来）+ 盒内的发光方块。
+        let mut sky_seeds: Vec<usize> = Vec::new();
+        let mut blk_seeds: Vec<usize> = Vec::new();
+        for cz in z0..=z1 {
+            for cx in x0..=x1 {
+                for y in 0..SY {
+                    let i = idx(cx, y, cz);
+                    if self.light[i] >> 4 > 1 {
+                        sky_seeds.push(i);
+                    }
+                    if b::light_emission(self.data[i]) > 0 {
+                        let e = b::light_emission(self.data[i]);
+                        self.light[i] = (self.light[i] & 0xF0) | e;
+                        blk_seeds.push(i);
+                    }
+                }
+            }
+        }
+        // 紧贴盒子外面那一圈：只喂光、不许被改（flood 里卡了范围，越界那几列写不进去）
+        for cz in (z0 - 1).max(0)..=(z1 + 1).min(SZ - 1) {
+            for cx in (x0 - 1).max(0)..=(x1 + 1).min(SX - 1) {
+                if cx >= x0 && cx <= x1 && cz >= z0 && cz <= z1 {
+                    continue; // 盒内的起点上面收过了
+                }
+                for y in 0..SY {
+                    let i = idx(cx, y, cz);
+                    if self.light[i] >> 4 > 1 {
+                        sky_seeds.push(i);
+                    }
+                    if (self.light[i] & 15) > 1 {
+                        blk_seeds.push(i);
+                    }
+                }
+            }
+        }
+
+        self.flood(true, sky_seeds, x0, x1, z0, z1);
+        self.flood(false, blk_seeds, x0, x1, z0, z1);
+        self.mark_dirty_box(x0, x1, z0, z1);
+    }
+
+    /// 光照改动会连带影响哪些网格：网格边缘往外的面是被邻格照的，所以半径 15 的盒子
+    /// 会跨进旁边那些网格 —— 只标自己那一个网格就会留下"挖开放了灯、旁边那格还是黑的"。
+    fn mark_dirty_box(&mut self, x0: i32, x1: i32, z0: i32, z1: i32) {
+        let c0 = (x0 / CHUNK).max(0);
+        let c1 = (x1 / CHUNK).min(CHUNKS_X - 1);
+        let d0 = (z0 / CHUNK).max(0);
+        let d1 = (z1 / CHUNK).min(CHUNKS_Z - 1);
+        for cz in d0..=d1 {
+            for cx in c0..=c1 {
+                self.dirty[(cz * CHUNKS_X + cx) as usize] = true;
+            }
+        }
+    }
+
 
     /// 碰撞专用的「挡不挡」：出界（水平方向）当墙，避免读者走出地图掉进虚空。
     #[inline]
@@ -269,6 +503,108 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 造一个说得清的场景：把 (bx..bx+11, 18..26, bz..bz+11) 腾空，y=20 铺地板、
+    /// y=25 盖一层石头顶。要露天天光就自己把顶顶穿。
+    fn 一块带顶的空间(bx: i32, bz: i32) -> World {
+        let mut w = World::new(11);
+        for x in bx..bx + 11 {
+            for z in bz..bz + 11 {
+                for y in 18..26 {
+                    w.set(x, y, z, b::AIR);
+                }
+                w.set(x, 20, z, b::STONE);
+                w.set(x, 25, z, b::STONE);
+            }
+        }
+        w.relight_all();
+        w
+    }
+
+    /// 造一条被石头包死的 21 格长地道（y=21，z 固定），两头、上下、左右都实。
+    fn 一条密封地道() -> World {
+        let mut w = World::new(11);
+        let z = 45i32;
+        for x in 30..=50 {
+            for y in [20i32, 22] {
+                w.set(x, y, z, b::STONE);
+            }
+            for dz in [-1i32, 1] {
+                w.set(x, 21, z + dz, b::STONE);
+            }
+            w.set(x, 21, z, b::AIR);
+        }
+        w.set(29, 21, z, b::STONE);
+        w.set(51, 21, z, b::STONE);
+        w.relight_all();
+        w
+    }
+
+    #[test]
+    fn 顶穿屋顶底下又变回满级天光而满级沿柱子一路不掉级() {
+        let mut w = 一块带顶的空间(40, 40);
+        let (cx, cz) = (45i32, 45i32);
+        assert_eq!(w.get(cx, 25, cz), b::STONE);
+        let under = w.sky_light(cx, 24, cz);
+        assert!(
+            under < 15,
+            "头顶压着一层实心石头，天光只能从边上绕进来，不该满级，拿到 {}",
+            under
+        );
+        // 正上方顶穿：满级天光沿柱子直落，一格都不该掉（天光最关键就是这条）
+        w.set(cx, 25, cz, b::AIR);
+        w.relight_around(cx, 25, cz);
+        assert_eq!(w.sky_light(cx, 24, cz), 15, "顶穿之后正下方该是满级天光");
+        assert_eq!(w.sky_light(cx, 21, cz), 15, "满级天光沿柱子往下不掉级，21 层也该 15");
+        // 局部重算必须和整张重算一模一样（半径 15 = 光的射程，所以这是做得到也该有的标准）
+        let r = World::from_raw(w.seed, w.data.clone()).unwrap();
+        assert_eq!(
+            r.light,
+            w.light,
+            "局部重算和整张重算对不上：不同的光照字节个数 = 应说清楚"
+        );
+    }
+
+    #[test]
+    fn 密封地道里全黑而一盏灯把光一格推到十五格以外() {
+        let mut w = 一条密封地道();
+        let z = 45i32;
+        assert_eq!(w.sky_light(40, 21, z), 0, "被石头包死的地道里不该有天光");
+        assert_eq!(w.block_light(40, 21, z), 0, "没灯就该是全黑");
+        w.set(31, 21, z, b::LAMP);
+        w.relight_around(31, 21, z);
+        assert_eq!(w.block_light(31, 21, z), 15, "灯自己那一格必须亮，不然灯里面是黑的");
+        assert_eq!(w.block_light(32, 21, z), 14, "往外一格该掉一级");
+        assert_eq!(w.block_light(40, 21, z), 6, "离灯 9 格：15-9=6");
+        assert_eq!(w.block_light(45, 21, z), 1, "离灯 14 格还剩 1");
+        assert_eq!(w.block_light(46, 21, z), 0, "离灯 15 格就是黑的了，光的射程就 15 步");
+        assert_eq!(w.block_light(40, 23, z), 0, "石头顶上面不该有光，实心方块吃光");
+        let r = World::from_raw(w.seed, w.data.clone()).unwrap();
+        assert_eq!(r.light, w.light, "放灯之后的局部重算和整张重算对不上");
+    }
+
+    #[test]
+    fn 光照重算不许慢到卡手() {
+        let mut w = World::new(3);
+        let t = std::time::Instant::now();
+        w.relight_all();
+        let all = t.elapsed();
+        let t2 = std::time::Instant::now();
+        w.relight_around(48, 20, 48);
+        let part = t2.elapsed();
+        println!(
+            "光照耗时：整张 {:?}｜局部（挖一格、放一格走这条） {:?}",
+            all, part
+        );
+        // 跑测试是 debug 编译，比 wasm 的 release 慢好几倍，所以这条只卡宽上限；
+        // 真实数字看 cargo test --release 打出来的那一行。
+        assert!(all < std::time::Duration::from_millis(900), "整张重算太慢：{:?}", all);
+        assert!(
+            part < std::time::Duration::from_millis(200),
+            "局部重算太慢，手机上点一下就卡：{:?}",
+            part
+        );
+    }
 
     #[test]
     fn 生成的地图不会把人生成在水里或空处() {

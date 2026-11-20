@@ -8,7 +8,7 @@
 use crate::blocks as b;
 use crate::world::{World, CHUNK, SY};
 
-pub const FLOATS_PER_VERTEX: usize = 7;
+pub const FLOATS_PER_VERTEX: usize = 9;
 
 /// 顶点着色器里的属性名要用到这几个偏移，改布局时两边一起改。
 pub const STRIDE_F32: usize = FLOATS_PER_VERTEX;
@@ -88,8 +88,10 @@ fn solid_at(w: &World, x: i32, y: i32, z: i32) -> bool {
     b::is_solid(w.get(x, y, z))
 }
 
-/// 算某个面某个角点的 AO 档位。
-fn ao_level(w: &World, cell: [i32; 3], face: usize, corner: usize) -> usize {
+/// 一个角点周围该看哪四格：面外那一格 + 沿两条切向的各一格 + 对角那一格。
+/// AO 和光照都从这张表取格子，所以不会出现「阴影按一套位置算、光照按另一套算」
+/// 那种早晚要对不上的东西。
+fn corner_neighbours(cell: [i32; 3], face: usize, corner: usize) -> [[i32; 3]; 4] {
     let n = NORMALS[face];
     let local = CORNERS[face][corner];
 
@@ -124,6 +126,32 @@ fn ao_level(w: &World, cell: [i32; 3], face: usize, corner: usize) -> usize {
     let mut pc = base;
     pc[axes[0]] += s1;
     pc[axes[1]] += s2;
+    [base, p1, p2, pc]
+}
+
+/// 这个角点上的光照等级（天光, 方块光），各自 0..15。四格取平均、不透明的当 0 ——
+/// 这就是平滑光照：一格一格硬分级会画出一层方块台阶，平均之后墙角和洞边是渐变的。
+/// 除数写死 4（不是「非透明那几格的个数」）：不然凸出来的角会被抬亮，看着像自己在发光。
+/// 岛的侧外面、世界顶上面那些"世界外"的格子按 sky_light/block_light 自己的规矩算
+/// （世界外一律 0），所以岛边缘会略偏暗一点，这点我知道，也是故意的：外面是真虚空。
+fn corner_light(w: &World, cell: [i32; 3], face: usize, corner: usize) -> (f32, f32) {
+    let nb = corner_neighbours(cell, face, corner);
+    let mut sky = 0u32;
+    let mut blk = 0u32;
+    for c in nb.iter() {
+        if b::is_solid(w.get(c[0], c[1], c[2])) {
+            continue; // 挡光的格子不参与平均（它自己那格的亮度不算进这个面）
+        }
+        sky += w.sky_light(c[0], c[1], c[2]) as u32;
+        blk += w.block_light(c[0], c[1], c[2]) as u32;
+    }
+    (sky as f32 / 4.0, blk as f32 / 4.0)
+}
+
+/// 算某个面某个角点的 AO 档位。
+fn ao_level(w: &World, cell: [i32; 3], face: usize, corner: usize) -> usize {
+    let nb = corner_neighbours(cell, face, corner);
+    let (p1, p2, pc) = (nb[1], nb[2], nb[3]);
 
     let side1 = solid_at(w, p1[0], p1[1], p1[2]);
     let side2 = solid_at(w, p2[0], p2[1], p2[2]);
@@ -137,8 +165,22 @@ fn ao_level(w: &World, cell: [i32; 3], face: usize, corner: usize) -> usize {
 }
 
 #[inline]
-fn push_vertex(m: &mut ChunkMesh, x: f32, y: f32, z: f32, u: f32, v: f32, shade: f32, emissive: f32) {
-    m.verts.extend_from_slice(&[x, y, z, u, v, shade, emissive]);
+fn push_vertex(
+    m: &mut ChunkMesh,
+    x: f32,
+    y: f32,
+    z: f32,
+    u: f32,
+    v: f32,
+    shade: f32,
+    emissive: f32,
+    sky: f32,
+    block: f32,
+) {
+    // 最后两格是 0..15 的天光 / 方块光等级。到了 main.rs 换算成 Vertex.color 的 .b / .a
+    // （那两槽本来是写死的 0 和 255，正好没人用），顶点布局宽度跟着从 7 涨到 9。
+    m.verts
+        .extend_from_slice(&[x, y, z, u, v, shade, emissive, sky, block]);
 }
 
 /// 贴图集的 UV。贴片排在同一行，所以只有水平方向需要偏移。
@@ -207,6 +249,7 @@ pub fn build_chunk(w: &World, cx: i32, cz: i32, out: &mut ChunkMesh) {
                         let (u, v) = UVS[face][c];
                         let (uu, vv) = tile_uv(tile, u, v);
                         let ao = AO_SHADE[ao_level(w, cell, face, c)];
+                        let (sky, blk) = corner_light(w, cell, face, c);
                         push_vertex(
                             out,
                             x as f32 + local[0],
@@ -216,6 +259,8 @@ pub fn build_chunk(w: &World, cx: i32, cz: i32, out: &mut ChunkMesh) {
                             vv,
                             base_shade * ao,
                             emissive,
+                            sky,
+                            blk,
                         );
                     }
 
@@ -245,6 +290,116 @@ pub fn build_chunk(w: &World, cx: i32, cz: i32, out: &mut ChunkMesh) {
 mod tests {
     use super::*;
     use crate::world::{CHUNKS_X, CHUNKS_Z};
+
+    /// 顶面的下标。mesh.rs 里只给底面起了名字（FACE_BOTTOM），顶面没有，
+    /// 所以在测试里自己起一个，并且下面钉一条断言：这个下标对应的法线必须是 +Y、
+    /// 明暗必须是 FACE_SHADE 里最亮那一档。名字起错了会被这条抓住，不会将错就错。
+    const TOP: usize = 3;
+
+    /// 光照等级不许跑到 0..15 外面、也不许是 NaN：到了 GPU 那是 u8，
+    /// 溢出会绕回，出现「亮的方块比最亮的还亮」这种一眼就不对的颜色。
+    #[test]
+    fn 每个顶点的光照等级都在零到十五之间而且不是nan() {
+        assert_eq!(NORMALS[TOP], [0, 1, 0], "顶面下标取错了，后面所有光照判据都会跟着错");
+        assert_eq!(
+            FACE_SHADE[TOP], 1.0,
+            "顶面该是 FACE_SHADE 里最亮那一档，说明 TOP 不是顶面"
+        );
+        let w = World::new(5);
+        let mut m = ChunkMesh::default();
+        for cz in 0..2 {
+            for cx in 0..2 {
+                build_chunk(&w, cx, cz, &mut m);
+            }
+        }
+        assert!(m.vert_count() > 0, "一个顶点都没出，这条判据等于没测");
+        for v in m.verts.chunks_exact(STRIDE_F32) {
+            for &k in &v[7..9] {
+                assert!(k.is_finite(), "光照等级不是个数：{:?}", k);
+                assert!(
+                    k >= 0.0 && k <= 15.0,
+                    "光照等级跑到 0..15 外面了：{}（上 GPU 是 u8，会绕回成别的颜色）",
+                    k
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn 站在露天的方块顶面四个角都是满级天光() {
+        let mut w = World::new(9);
+        for x in 40..52 {
+            for z in 40..52 {
+                for y in 18..30 {
+                    w.set(x, y, z, b::AIR);
+                }
+                w.set(x, 20, z, b::STONE);
+            }
+        }
+        w.set(45, 21, 45, b::STONE); // 空地正当中站一格
+        w.relight_all();
+        for c in 0..4 {
+            let (sk, _bl) = corner_light(&w, [45, 21, 45], TOP, c);
+            assert_eq!(
+                sk, 15.0,
+                "露天的方块顶面第 {} 个角该是满级天光，拿到 {}",
+                c,
+                sk
+            );
+        }
+    }
+
+    /// 石头屋：没灯就该全黑；点一盏灯之后同一个面上必须有明显明暗渐变 ——
+    /// 光照是逐格掉级的，不是「开一盏全屋亮」。四角全算、取最大最小差，
+    /// 这样判据不依赖「角 0 朝哪边」那种我没写死的东西。
+    #[test]
+    fn 石头屋里没灯是全黑点一盏灯同一个面上要有明暗渐变() {
+        let mut w = World::new(9);
+        for x in 44..49 {
+            for z in 44..49 {
+                for y in 19..24 {
+                    w.set(x, y, z, b::AIR);
+                }
+            }
+        }
+        for x in 43..50 {
+            for z in 43..50 {
+                w.set(x, 19, z, b::STONE);
+                w.set(x, 23, z, b::STONE);
+            }
+        }
+        for z in 43..50 {
+            for y in 19..24 {
+                w.set(43, y, z, b::STONE);
+                w.set(49, y, z, b::STONE);
+            }
+        }
+        for x in 43..50 {
+            for y in 19..24 {
+                w.set(x, y, 43, b::STONE);
+                w.set(x, y, 49, b::STONE);
+            }
+        }
+        w.relight_all();
+        let (sk, bl) = corner_light(&w, [46, 19, 46], TOP, 0);
+        assert_eq!(sk, 0.0, "被石头包死的屋里不该有天光，拿到 {}", sk);
+        assert_eq!(bl, 0.0, "石头屋里没灯就该是全黑，拿到 {}", bl);
+
+        w.set(44, 21, 44, b::LAMP); // 灯摆在屋子一角
+        w.relight_all();
+        let mut vals = [0f32; 4];
+        for c in 0..4 {
+            vals[c] = corner_light(&w, [48, 19, 48], TOP, c).1; // 屋子另一头的地板格
+        }
+        let hi = vals.iter().fold(0f32, |a, &b| if b > a { b } else { a });
+        let lo = vals.iter().fold(15f32, |a, &b| if b < a { b } else { a });
+        assert!(hi > 0.0, "点了一盏灯，屋子另一头也该接到一点光，结果一点都没有");
+        assert!(
+            hi - lo >= 4.0,
+            "同一个面上最大最小只差 {:.1} 级：光照不像逐格掉级的，更像『开一盏全屋亮』",
+            hi - lo
+        );
+    }
 
     #[test]
     fn 平面地形每个区块只出顶面和四周() {

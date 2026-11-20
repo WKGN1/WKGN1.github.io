@@ -357,6 +357,8 @@ varying mediump vec2 uv;
 varying lowp float shade;
 varying lowp float emissive;
 varying mediump vec3 wpos;
+varying lowp float skyl;
+varying lowp float blk;
 
 uniform mat4 Model;
 uniform mat4 Projection;
@@ -369,6 +371,9 @@ void main() {
     uv = texcoord;
     shade = color0.r / 255.0;
     emissive = color0.g / 255.0;
+    // .b/.a 是天光、方块光等级（0..15 摊到 0..255）。颜色不在顶点里，去那张色表取。
+    skyl = color0.b / 255.0;
+    blk = color0.a / 255.0;
     wpos = world.xyz;
 }
 "#;
@@ -383,9 +388,13 @@ varying mediump vec2 uv;
 varying lowp float shade;
 varying lowp float emissive;
 varying mediump vec3 wpos;
+varying lowp float skyl;
+varying lowp float blk;
 
 uniform sampler2D Texture;
-uniform float u_day;        // 0..1，夜里压暗到 0.3 左右
+// 16×16 的光照色表：横轴天光等级、纵轴方块光等级，每格是这两种光混一起该是什么颜色。
+// 昼夜只换这张 1 KB 的表，不动顶点、也不动网格。
+uniform sampler2D u_light;
 uniform vec3 u_eye;
 uniform vec3 u_fog_color;
 uniform float u_fog_near;
@@ -394,8 +403,10 @@ uniform float u_bright;     // 0 = 保持现在这样，越大越亮（夜里手
 
 void main() {
     vec4 tex = texture2D(Texture, uv);
-    float light = mix(0.32, 1.0, u_day);
-    vec3 col = tex.rgb * shade * light;
+    // 等级 0..15 要落在 texel 中心上：中心是 (等级 + 0.5) / 16，所以偏 1/32。
+    // 不偏这半格，Nearest 采样会让 0 级采到 1 级的颜色、15 级采到表外面去。
+    vec2 lv = vec2(skyl * 0.9375 + 0.03125, blk * 0.9375 + 0.03125);
+    vec3 col = tex.rgb * shade * texture2D(u_light, lv).rgb;
     // 自发光方块不吃昼夜和 AO，夜里能看到自己亮的灯。
     col = mix(col, tex.rgb * 1.12, emissive);
 
@@ -431,7 +442,6 @@ fn make_material() -> Material {
             ..Default::default()
         },
         uniforms: vec![
-            macroquad::miniquad::UniformDesc::new("u_day", macroquad::miniquad::UniformType::Float1),
             macroquad::miniquad::UniformDesc::new("u_eye", macroquad::miniquad::UniformType::Float3),
             macroquad::miniquad::UniformDesc::new(
                 "u_fog_color",
@@ -450,7 +460,10 @@ fn make_material() -> Material {
         // "Texture" 是 macroquad 的保留槽名：着色器里照写 uniform sampler2D Texture，
         // 但别列进这里——列了 make_pipeline 直接 panic（quad_gl.rs 里那句
         // "you can't use name `Texture` ..."）。绘制时传进来的贴图会自动占住这个槽。
-        textures: vec![],
+        // 采样器名字要写在 textures 里，而且是**字符串名字**（miniquad 0.4.11 的
+        // UniformType 里根本没有 Texture 这一项，textures 的类型是 Vec<String>）。
+        // 别写错名字：这里漏一个，着色器里那个 sampler 就永远采不到东西。
+        textures: vec!["u_light".to_string()],
     };
 
     load_material(
@@ -505,6 +518,43 @@ fn sky_color(t: f32) -> Color {
 }
 
 /// 光照强度：白天 1，夜里 0，过渡用平滑段。黄昏/黎明各占约 12%。
+/// 16×16 的光照色表（1 KB）：横轴 = 天光等级 0..15，纵轴 = 方块光等级 0..15。
+/// 顶点上只存等级、不存颜色，所以昼夜变化只要重传这 1 KB，不用碰任何网格或顶点。
+/// 颜色是我自己调的：白天天光接近白（跟今天画面对得上，不然一上线就先换个样给人看），
+/// 夜里降成很暗的蓝灰；方块光是暖橙（萤石灯的调子）。两路光用 1-(1-a)(1-b) 合，
+/// 不是直接相加 —— 相加会让「白天露天、旁边还点着灯」那种地方糊成一片死白。
+/// 最暗处也不给纯黑，留一点点蓝：全黑在手机上就是「啥也看不见」，容易被当成游戏卡住了。
+fn lightmap_rgba(t: f32) -> [u8; 16 * 16 * 4] {
+    let d = daylight(t);
+    // daylight 是 1.0（白天）..0.5（夜里），拉回 0..1 当"白天程度"
+    let k = ((d - 0.5) * 2.0).clamp(0.0, 1.0);
+    let mix = |a: f32, b: f32| a + (b - a) * k;
+    // 天光颜色：夜里很暗的蓝灰 → 白天接近白（略偏冷）
+    let sky_t = [mix(0.30, 1.00), mix(0.38, 1.01), mix(0.62, 1.06)];
+    // 方块光颜色：暖橙，红通道给满、蓝通道压住，看着才像火光不像日光
+    let blk_t = [1.00f32, 0.74, 0.44];
+    // 全黑时的底光：一点点蓝，别让洞穴和夜里成纯黑一块
+    let floor = [0.055f32, 0.062, 0.078];
+    let mut out = [0u8; 16 * 16 * 4];
+    for by in 0..16usize {
+        for sx in 0..16usize {
+            let s = sx as f32 / 15.0;
+            let b = by as f32 / 15.0;
+            let i = (by * 16 + sx) * 4;
+            for ch in 0..3 {
+                let sc = sky_t[ch] * s;
+                let bc = blk_t[ch] * b;
+                // 两条光合成（不是相加）：任一条满了，另一条再加也几乎看不见了
+                let c = 1.0 - (1.0 - sc) * (1.0 - bc);
+                let c = c.max(floor[ch]);
+                out[i + ch] = (c.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            }
+            out[i + 3] = 255;
+        }
+    }
+    out
+}
+
 fn daylight(t: f32) -> f32 {
     let t = t.rem_euclid(1.0);
     if t < 0.38 {
@@ -521,9 +571,13 @@ fn daylight(t: f32) -> f32 {
     .clamp(0.0, 1.0)
 }
 
+/// HUD 上那个钟。本来 t=0 就当 00:00，但明暗那条曲线不是这么定的：满亮在 t<0.38、
+/// 天从 t=0.38 起转暗、0.52..0.86 是夜、0.86 之后才回亮 —— 也就是"正午"落在 t≈0.2、
+/// "半夜"落在 t≈0.7，整套比钟面晚 7 小时。以前夜并不真黑，这个差没人看得出；
+/// 现在夜是黑的，钟写「13:30」而外面一片黑就是明摆着的自相矛盾，所以给钟加 7 小时。
 fn clock_text(t: f32) -> String {
     let t = t.rem_euclid(1.0);
-    let total = (t * 24.0 * 60.0) as i32;
+    let total = (t * 24.0 * 60.0) as i32 + 7 * 60;
     let h = (total / 60) % 24;
     let m = total % 60;
     format!("{:02}:{:02}", h, m)
@@ -553,6 +607,9 @@ struct Game {
     /// 这是显示偏好不是游戏状态，换设备该跟着浏览器走）。
     bright: u8,
     /// 当前水帧 + 计时器。每 0.5 秒换一帧，只覆写图集里水那一格 16×16。
+    /// 16×16 的光照色表 + 它是按哪个"白天程度"建的（变了才重传那 1 KB）。
+    lightmap: Texture2D,
+    lightmap_bucket: i32,
     water_frame: usize,
     /// 生存挖掘进度：(正盯着哪一格, 还差几下点碎)。None = 没有进行中的挖掘。
     mine: Option<([i32; 3], u8)>,
@@ -612,6 +669,8 @@ impl Game {
             note_timer: 0.0,
             atlas: None,
             bright: 0,
+            lightmap: Texture2D::from_rgba8(16, 16, &lightmap_rgba(0.0)),
+            lightmap_bucket: -1,
             water_frame: 0,
             mine: None,
             mine_total: 0,
@@ -653,12 +712,14 @@ impl Game {
                 verts.push(Vertex {
                     position: vec3(v[0], v[1], v[2]),
                     uv: vec2(v[3], v[4]),
-                    // .r = 明暗，.g = 自发光标记
+                    // .r = 明暗，.g = 自发光标记，.b/.a = 天光、方块光等级（0..15 → 0..255）。
+                    // 这两槽原来是写死的 0 和 255，谁都没用，正好拿来带光照：
+                    // 顶点布局宽度、属性个数、索引全没变，只是把空着的字节填上。
                     color: [
                         (v[5] * 255.0) as u8,
                         if v[6] > 0.5 { 255 } else { 0 },
-                        0,
-                        255,
+                        ((v[7] * 17.0) as u8).min(255),
+                        ((v[8] * 17.0) as u8).min(255),
                     ],
                     normal: vec4(0.0, 0.0, 0.0, 0.0),
                 });
@@ -723,6 +784,9 @@ impl Game {
         self.mine = None;
         self.mine_total = 0;
         self.world.set(x, y, z, b::AIR);
+        // 挖开一格会改变光照（洞里的光要从洞口往里摊）。整张图才 44 万格、局部那一坨
+        // （半径 15 = 光的射程）release 下实测 2 毫秒，不卡手。
+        self.world.relight_around(x, y, z);
         self.save_dirty = true;
         // 生存才掉料。创造挖了就是挖了，背包里那些格子永远是 0 个。
         if !self.creative && self.inv.add(id, 1) > 0 {
@@ -762,6 +826,8 @@ impl Game {
             return; // can_place 上头已经说过了，这儿只是兜底
         };
         self.world.set(cell[0], cell[1], cell[2], id);
+        // 放下方块同样要重算光照（它挡光，也可能自己发光）
+        self.world.relight_around(cell[0], cell[1], cell[2]);
         self.save_dirty = true;
     }
 
@@ -961,15 +1027,24 @@ impl Game {
         };
         // 第 9 段是位姿读数（位置 + 朝向），界面上只映射前 8 段所以不会显示，
         // 留给外部自动化测试用：有了 yaw/pitch 才能验「往右拖是不是真往右转」这种方向问题。
+        // 眼睛那一格的光照读数：站在露天 sk 该是 15，钻进洞里要掉下来，点一盏灯 bl 要升到 15。
+        // 光照这种事不靠我截图猜，判据直接读这两个数。
+        let le = self.player.eye();
+        // eye() 给的是 [f32;3]，不是 Vec3 —— 索引别写成字段
+        let (lex, ley, lez) = (le[0].floor() as i32, le[1].floor() as i32, le[2].floor() as i32);
+        let (lsx, lblk) = (
+            self.world.sky_light(lex, ley, lez),
+            self.world.block_light(lex, ley, lez),
+        );
         let pos = format!(
-            "x{:.2} y{:.2} z{:.2} yaw{:.3} pitch{:.3} wf{} br{}",
+            "x{:.2} y{:.2} z{:.2} yaw{:.3} pitch{:.3} wf{} br{} sk{} bl{}",
             self.player.pos[0],
             self.player.pos[1],
             self.player.pos[2],
             self.player.yaw,
             self.player.pitch,
             self.water_frame,
-            self.bright
+            self.bright, lsx, lblk
         );
         let sel = self.inv.selected_slot();
         let held = if self.creative {
@@ -1546,7 +1621,20 @@ async fn main() {
                     );
                 }
             }
-            material.set_uniform("u_day", daylight(game.time_of_day));
+            // 光照色表：白天程度（量化成 64 档）一动就重传那 1 KB。顶点里存的是等级不是颜色，
+            // 所以换昼夜既不重建网格也不重传顶点 —— 这是把光照塞进顶点颜色空槽换来的便宜。
+            material.set_texture("u_light", game.lightmap.clone());
+            let bucket = (daylight(game.time_of_day) * 64.0) as i32;
+            if bucket != game.lightmap_bucket {
+                game.lightmap_bucket = bucket;
+                let bytes = lightmap_rgba(game.time_of_day).to_vec();
+                let img = macroquad::texture::Image {
+                    bytes,
+                    width: 16,
+                    height: 16,
+                };
+                game.lightmap.update_part(&img, 0, 0, 16, 16);
+            }
             material.set_uniform("u_eye", eye_v);
             material.set_uniform(
                 "u_fog_color",
@@ -1577,5 +1665,23 @@ async fn main() {
         }
 
         next_frame().await
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// HUD 那个钟得跟明暗对得上。以前夜不真黑，钟和光各说各话没人看得出来；
+    /// 现在夜是黑的，钟写「13:30」而外面一片黑就是明显的自相矛盾，所以钉住几个点。
+    #[test]
+    fn 显示的钟要和明暗对得上不能各说各话() {
+        // daylight 的相位：t<0.38 满亮，0.38..0.52 转暗，0.52..0.86 是夜，0.86 之后回亮
+        assert_eq!(clock_text(0.20), "11:48", "最亮的时候该在正午前后");
+        assert_eq!(clock_text(0.52), "19:28", "天刚黑该是傍晚，不该是下午");
+        assert_eq!(clock_text(0.68), "23:19", "最黑的时候该在半夜前后");
+        assert_eq!(clock_text(0.06), "08:26", "早上该是早上");
     }
 }

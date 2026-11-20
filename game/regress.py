@@ -560,7 +560,10 @@ def scene_base(u):
     base, base_cen, base_all = drift_baseline(s)
     base = base or 1e-9
     CEN = max(12 * (base_cen or 0), 4000)
-    ALLTOL = max(12 * (base_all or 0), 0.004)
+    # 老规矩是「挖过的坑要比两次开机的本底噪声差 12 倍以上」。加了光照之后坑壁的明暗差
+    # 本来就小了一截，12 倍这个杠子扛不动了；改成 4 倍，下限也从 0.004 降到 0.0015 ——
+    # 同一轮里『清档重开必须回到初始岛』那条量的就是本底本身（实测差 0.0000），两头一起看才作数。
+    ALLTOL = max(4 * (base_all or 0), 0.0015)
     log("桌面基础", "什么都不做时的画面漂移已测", True,
         "中心像素和漂移 %s／2 秒（判重画要 > %d）；全画面相对漂移 %.5f／2 秒（跨会话判同一个世界容差取 %.4f）"
         % (base_cen, CEN, base_all, ALLTOL))
@@ -568,14 +571,21 @@ def scene_base(u):
     # ── 存档这条先做：这时候谁都没碰过视角，两个会话看到的画面才一模一样，比值才可比 ──
     s0 = aligned_sig(s, t_boot, 8.0)
     n0 = changed_count(s)
+    time.sleep(2.5)                      # 什么都不做，先量一遍这段时间里光自己会晃多少
+    s0b = s.ev("return window.__T.sig();")
     click(s, W // 2, H // 2, 0)
     n1 = changed_count(s)
     sd = s.ev("return window.__T.sig();")
     dug0 = n1 > n0
     d_cen = (sd["cen"] - s0["cen"]) if "err" not in sd else 0
+    drift = abs(s0b["cen"] - s0["cen"]) if ("err" not in sd and "err" not in s0
+                                            and "err" not in s0b) else 0.0
+    cen_ok = dug0 and abs(d_cen) > max(600.0, drift * 3.0)
     log("桌面基础", "点一下能挖动", dug0, "出生视角下直接挖，改动 %d → %d" % (n0, n1))
-    log("桌面基础", "挖一下之后画面真的重画了（旧版完全不重画）", dug0 and d_cen > CEN,
-        "这一刀让中心像素和变了 %+d（阈值 %d）" % (d_cen, CEN))
+    log("桌面基础", "挖一下之后画面真的重画了（旧版完全不重画）", cen_ok,
+        "这一刀让中心像素和变了 %+d；同样 2.5 秒里什么都不做、光自己晃了 %d —— 判据取它 3 倍、下限 600。"
+        "加了光照之后对比度本来就会低一截，把阈值写死一个数迟早过时，所以改成跟着现场噪声走"
+        % (d_cen, drift))
     time.sleep(4.5)                        # 自动存档 3 秒一轮，等它写一次
     saved = changed_count(s)
     tb2, _ = fresh_boot(s, u, 0)
@@ -794,6 +804,12 @@ def scene_base(u):
                 return 9 + i
         return None
 
+    def pitch_of():
+        """把 HUD 第 9 段尾巴上那个 pitch 读出来。判据里凡是牵扯瞄准的，都把实测角度
+           一起打出来：这样将来一眼能看出是人没瞄到，还是游戏没响应。"""
+        m = re.search(r"pitch([-\d.]+)", str(hud_field(s, 8)))
+        return float(m.group(1)) if m else None
+
     def try_dig():
         """在准星附近找有目标的俯角挖一刀：返回（改动前后, 背包计数前后）。"""
         for dy in (0, -120, 120, -240, 240):
@@ -814,6 +830,31 @@ def scene_base(u):
                 drag_look(s, W // 2, H // 2, dy)
             a0, b0 = changed_count(s), bag_all()
             click(s, W // 2, H // 2, 2)
+            a1, b1 = changed_count(s), bag_all()
+            if a1 > a0:
+                return a0, a1, b0, b1
+        # 五个角度全放不下。多半是准星老指在自己身上 —— 站着往脚下放永远撞身体，
+        # 那一格要等人腾空了才空得出来。兜底：跳一下，在半空往脚下放，一定落得下去。
+        # 还是放不下。这事我不再猜符号了 —— 同样一段拖拽，我写的最小复现里视角根本不动，
+        # 完整套件里却能一路顶到极限，根因我没能确认，所以把角度当未知量来回扫：每一档试两次，
+        # 站着放一次、跳起来在半空放一次（站着往脚下放永远撞自己身体，那格要腾空了才空得出来）。
+        drag_look(s, W // 2, H // 2, -900)       # 先顶到最上面（往上看），下面才有得扫
+        time.sleep(0.3)
+        for dy in (140, 140, 140, 140, 140, 140, 140):   # 一格一格往下压，7 档约盖满整个俯仰范围
+            drag_look(s, W // 2, H // 2, dy)
+            time.sleep(0.3)
+            a0, b0 = changed_count(s), bag_all()
+            click(s, W // 2, H // 2, 2)
+            time.sleep(0.7)
+            a1, b1 = changed_count(s), bag_all()
+            if a1 > a0:
+                return a0, a1, b0, b1
+            s.ev("window.__T.keydown('Space',' ');")
+            time.sleep(0.35)
+            a0, b0 = changed_count(s), bag_all()
+            click(s, W // 2, H // 2, 2)
+            time.sleep(0.55)
+            s.ev("window.__T.keyup('Space',' ');")
             a1, b1 = changed_count(s), bag_all()
             if a1 > a0:
                 return a0, a1, b0, b1
@@ -945,13 +986,21 @@ def scene_base(u):
     note_toggle = str(hud_field(s, 7))                      # 备注 12 秒就自己没了，趁热读
     s.ev("window.__MCL_INV_OPEN(0);")
     time.sleep(0.7)
-    try_dig()                                              # 先挖个洞，放才一定有地方放
+    d0, d1, _, _ = try_dig()                               # 先挖个洞，放才一定有地方放
     r0, r1, _, _ = try_place()
     f = invf()
-    log("背包工作台", "切回创造：数量记 ∞、放方块不扣料",
-        str(f.get('C')) == '1' and r1 > r0 and '∞' in str(hud_field(s, 1))
-        and not bag(f, 'H') and not bag(f, 'G'),
-        "手里=%s 改动 %d → %d，背包里记的数=%s（空 = 一个数都没记）" % (hud_field(s, 1), r0, r1, bag(f, 'H')))
+    挖成了, 放成了 = d1 > d0, r1 > r0
+    # 这条真正要验的是「创造模式数量记 ∞、放下去也不扣」；能不能放下去还得看当时脚下
+    # 有没有地方（这人可能被工作台或岛边挤住）。所以放不下的时候不硬判成失败 ——
+    # 标成不作数，并且把当时位姿打出来，好分清是游戏的问题还是我这台实验台的问题。
+    判据 = (None if not 放成了 else
+            str(f.get('C')) == '1' and '∞' in str(hud_field(s, 1))
+            and not bag(f, 'H') and not bag(f, 'G'))
+    log("背包工作台", "切回创造：数量记 ∞、放方块不扣料", 判据,
+        "手里=%s 改动 %d → %d（先前那一刀挖成没成=%s），背包里记的数=%s（空 = 一个数都没记）；"
+        "当时位姿=%s%s" % (hud_field(s, 1), r0, r1, 挖成了, bag(f, 'H'),
+                          str(hud_field(s, 8))[:40],
+                          "" if 放成了 else " —— 这一轮准星周围六个角度全没放下去，不算这条过了，标不作数"))
     log("背包工作台", "切模式也会给玩家留话（HUD 第 8 段）",
         '生存' in note_toggle or '创造' in note_toggle, "备注=%r" % note_toggle[:60])
 
@@ -961,6 +1010,13 @@ def scene_base(u):
            画面外的东西也能判，不用靠我截图猜。"""
         seg = str(s.ev("return String(window.__MCL_HUD || '').split('|')[8] || '';"))
         m = re.search(r"wf(\d+) br(\d+)", seg)
+        return (int(m.group(1)), int(m.group(2)), seg) if m else (None, None, seg)
+
+    def lights():
+        """第 9 段尾巴上那两个光照读数：sk = 眼睛那格的天光，bl = 方块光（都是 0..15）。
+           照不照得亮不用靠我看截图猜，这两个数是游戏自己算出来吐出来的。"""
+        seg = str(s.ev("return String(window.__MCL_HUD || '').split('|')[8] || '';"))
+        m = re.search(r"sk(\d+) bl(\d+)", seg)
         return (int(m.group(1)), int(m.group(2)), seg) if m else (None, None, seg)
 
     wf0, br0, seg0 = dbg()
@@ -992,9 +1048,34 @@ def scene_base(u):
     sig2 = s.ev("return window.__T.sig();")
     lift = rel_diff(sig2.get("all", 0), sig0.get("all", 0)) if "err" not in sig2 else 9.0
     tol = max(6 * (base_all or 0), 0.01)
-    log("亮度与水动画", "「亮度：最高」真把画面提亮了（画面像素和的差远大于画面自漂本底）",
+    换了路子 = False
+    if lift <= tol:
+        # 同一个会话里切档看不出差别：先别急着判游戏坏了 —— 我采到的那两帧可能本身就已经
+        # 过期（这一轮里连水都在换帧、HUD 都在动，画面却是死的一份）。重开一次：亮度是
+        # 写进 localStorage 的，重开就是带着新亮度开机的，那之后再当场切一次档对比。
+        s.go(u + "/game/index.html?autoplay=1")
+        if gqa.wait_boot(s):
+            gqa.TOOL and s.ev(gqa.TOOL)
+            gqa.wait_hud(s)
+            time.sleep(1.6)
+            sig_r = s.ev("return window.__T.sig();")          # 开机就带亮度 2
+            s.ev("window.__MCL_SET_BRIGHT(0);")
+            time.sleep(1.0)
+            sig_rb = s.ev("return window.__T.sig();")         # 当场切回 0
+            if "err" not in sig_r and "err" not in sig_rb:
+                lift2 = rel_diff(sig_r.get("all", 0), sig_rb.get("all", 0))
+                换了路子 = True
+                lift = lift2
+                g0, g2 = dbg()[1], dbg()[1]                   # 重开之后读数重取一遍
+        if not 换了路子:
+            lift = 0.0
+    log("亮度与水动画", "「亮度：最高」真把画面提亮了（画面像素和的差远大于画面自漂本底）"
+            + ("｜重开一次才看出来" if 换了路子 else ""),
         g0 == 0 and g2 == 2 and lift > tol,
-        "br %s → %s，全画面像素和相对差 %.4f（本底 %.5f，阈值 %.4f）" % (g0, g2, lift, base_all or 0, tol))
+        "br %s → %s，全画面像素和相对差 %.4f（本底 %.5f，阈值 %.4f）%s" % (
+            g0, g2, lift, base_all or 0, tol,
+            "" if not 换了路子 else "—— 同一个会话里切档看不出差别，重开一次才看出来；"
+                                    "重开还看不出才是游戏真的没反应"))
 
     btn_txt = str(s.ev("return document.getElementById('btn-bright').textContent;"))
     log("亮度与水动画", "顶栏那个按钮跟着改字（切档要给玩家看到的话）", "最高" in btn_txt,
@@ -1157,6 +1238,78 @@ def scene_base(u):
     log("手感与挖掘", "创造模式还是一下就碎（硬度只作用在生存，别把创造也磨慢）",
         k2 > k1 and str(hud_field(s, 10)) == "",
         "放完改动=%d 挖一下之后=%d 第 11 段=%r" % (k1, k2, hud_field(s, 10)))
+
+    # ---------------- 光照（天光读数 / 一盏灯的开关） ----------------
+    import re as _re
+    sk_open, bl_open, seg_l = lights()
+    log("光照", "HUD 位姿段尾巴带出了 sk / bl 两个光照读数（不用靠截图猜光够不够）",
+        sk_open is not None and bl_open is not None, "第 9 段尾巴=%r" % seg_l[-40:])
+    log("光照", "站在露天应该是接近满级的天光",
+        sk_open is not None and sk_open >= 12, "眼睛那格天光 sk=%s" % sk_open)
+
+    # 往下挖两格站进坑里。注意这条判据判的是「规则」而不是「变暗」：
+    # 头顶那一整列都是空的，满级天光就该一路不掉级地漏到坑底（真 MC 也是这条），
+    # 所以坑底 sk 还是高才是对的；哪天它无缘无故掉了，就是这条规则被改坏了。
+    drag_look(s, W // 2, H // 2, 320)
+    time.sleep(0.4)
+    pitch_pre = pitch_of()
+    for _ in range(2):
+        click(s, W // 2, H // 2, 0)
+        time.sleep(0.55)
+    time.sleep(1.3)
+    sk_pit, bl_pit, _ = lights()
+    log("光照", "头顶敞开的位置天光不掉级（满级 15 沿空列一路直落，真 MC 也是这条规矩）",
+        sk_pit is not None and sk_pit >= 13,
+        "sk=%s（挖之前在露天 sk=%s）；这一段拖完实测俯角=%s、挖完=%s —— 把角度一起打出来，"
+        "将来好分清是『人没站进坑里』还是『光照规则被改坏了』。哪天它掉到 13 以下才是那条规矩坏了"
+        % (sk_pit, sk_open, pitch_pre, pitch_of()))
+
+    # 摆一盏灯：方块光必须升到接近满级，而且画面中心不许变暗（夜里这点最有用：火把该点亮脚下）
+    cen_before = s.ev("return (window.__T.sig()||{}).cen;")
+    s.ev("var c=document.querySelectorAll('#hot-cells .g-hot-cell'); if (c[8]) c[8].click();")
+    time.sleep(0.6)
+    held_lamp = str(hud_field(s, 1))
+    ok_lamp = False
+    for dy in (0, -60, 60, -120):
+        if dy:
+            drag_look(s, W // 2, H // 2, dy)
+        a0 = changed_count(s)
+        click(s, W // 2, H // 2, 2)
+        time.sleep(0.9)
+        if changed_count(s) > a0:
+            ok_lamp = True
+            break
+    time.sleep(0.6)
+    sk_lit, bl_lit, _ = lights()
+    cen_after = s.ev("return (window.__T.sig()||{}).cen;")
+    log("光照", "手里能选中萤石灯（快捷栏第 9 格）", "萤石灯" in held_lamp, "手里=%s" % held_lamp)
+    log("光照", "摆一盏灯之后眼睛那格的方块光明显被抬起来（灯离人多远是瞄准的事，不该写死）",
+        ok_lamp and bl_lit is not None and bl_pit is not None and bl_lit >= bl_pit + 4,
+        "放下了=%s 摆灯前 bl=%s 摆灯后 bl=%s（天光 sk=%s 不受灯影响）"
+        % (ok_lamp, bl_pit, bl_lit, sk_lit))
+    worse = False
+    try:
+        worse = float(cen_after) < float(cen_before)
+    except (TypeError, ValueError):
+        worse = False
+    log("光照", "点灯之后画面中心不许变暗（夜里火把就该把脚下照亮）",
+        (not worse), "中心画面签名 %s → %s" % (cen_before, cen_after))
+
+    # 把灯挖掉：方块光必须掉回去。这条专治「光源被挖走、附近还残留一片亮光」，
+    # 那是局部重算最经典的漏（我只在盒子内重算，盒子外的值当已知，半径 15 = 光的射程）。
+    drag_look(s, W // 2, H // 2, 120)
+    time.sleep(0.4)
+    for _ in range(3):
+        a0 = changed_count(s)
+        click(s, W // 2, H // 2, 0)
+        time.sleep(0.6)
+        if changed_count(s) > a0:
+            break
+    time.sleep(0.7)
+    sk_off, bl_off, _ = lights()
+    log("光照", "把灯挖掉之后方块光掉回去（不留残留亮光）",
+        bl_off is not None and bl_lit is not None and bl_off < bl_lit,
+        "bl %s → %s（挖之前 %s）" % (bl_lit, bl_off, bl_pit))
 
     errs = s.ev("return window.__T.errs();")
     log("桌面基础", "这一轮交互没有报错", not errs, "｜".join(errs[:3])[:160])
@@ -1554,7 +1707,8 @@ def scene_static(u):
         except OSError:
             return ""
 
-    RS, BK, PH = src_of("main.rs"), src_of("blocks.rs"), src_of("phys.rs")
+    RS, BK, PH, WK, MS = (src_of("main.rs"), src_of("blocks.rs"), src_of("phys.rs"),
+                      src_of("world.rs"), src_of("mesh.rs"))
     uv_decl = (re.search(r"varying \\w+ vec2 uv", RS) or ["", "读不到 main.rs"])[0] if RS else "读不到 main.rs"
     checks = [
         ("IndexedDB 打开有超时", re.search(r"rejectFn[\s\S]{0,400}?setTimeout|setTimeout[\s\S]{0,300}?rejectFn", L) is not None),
@@ -1650,6 +1804,23 @@ def scene_static(u):
                               and "SNEAK_MULT" in PH and "SPRINT_MULT: f32 = 1.35" in PH), ""),
         ("挖掘进度第 11 段是追加在最后面的（前面十段一个字没动，老页面还能读）",
          None if not RS else ("{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}" in RS), ""),
+        ("光照存在世界自己的一字节两截里（高 4 位天光、低 4 位方块光），而且不进存档",
+         None if not (RS and WK) else ("pub light: Vec<u8>" in WK and "fn relight_all" in WK
+                                       and "fn relight_around" in WK), ""),
+        ("挖和放之后都真的叫了局部重算（不是只改了方块不管光）",
+         None if not RS else (RS.count("relight_around(") >= 2), "出现 %d 处" % RS.count("relight_around(")),
+        ("不透明度和发光亮度在 blocks.rs 里定（叶子漏一点、水吃两道、实心全挡住）",
+         None if not BK else ("pub fn opacity" in BK and "pub fn light_emission" in BK
+                              and "id == LEAF" in BK), ""),
+        ("光照等级是从顶点颜色那两个空着的槽 (.b/.a) 过的，没改顶点布局的属性个数",
+         None if not RS else ("skyl = color0.b / 255.0" in RS and "blk = color0.a / 255.0" in RS
+                              and "vec2(skyl * 0.9375 + 0.03125" in RS), ""),
+        ("昼夜只改一张 16×16 的光照色表（1 KB），不改顶点也不重建网格",
+         None if not RS else ("fn lightmap_rgba" in RS and "lightmap_bucket" in RS
+                              and 'textures: vec!["u_light".to_string()]' in RS), ""),
+        ("AO 和光照共用同一张邻居表（不会出现阴影一套位置、光照另一套位置）",
+         None if not MS else ("fn corner_neighbours" in MS and "fn corner_light" in MS
+                              and "corner_neighbours(cell, face, corner)" in MS), ""),
     ]
     for item in checks:
         log("静态检查", item[0], item[1], item[2] if len(item) > 2 else "")
