@@ -102,6 +102,11 @@ class Sess:
 HOOK = r"""
 if (window.__GQA_HOOKED) return '已在';
 window.__GQA_HOOKED = 1;
+// 测试模式：锁上鼠标后 pushLook 本来改用 movementX，可无头测试里的拖拽是按 clientX
+// 算的（258 像素/弧度那套）。告诉胶水一句"我在测试"，锁着也照 clientX 算，判据不受影响。
+window.__MCL_LOCK_TEST = 1;
+// 自动化里别自动抢锁：判据的拖拽/点击是按光标能自由移动标定的（Tab 手动开关照旧可测）。
+window.__MCL_AUTOLOCK_OFF = 1;
 window.__CERR = [];
 window.__CWARN = [];
 window.__CLOG = [];
@@ -1225,7 +1230,7 @@ def scene_base(u):
 
     def place_once():
         """右键放一个手里选中的方块，找一个放得下的俯角。放成了返回 True。"""
-        for dy in (0, -120, 120, -240):
+        for dy in (0, -120, 120, -240, -360, -480, 240, 420):   # 俯角扫宽一点：站的地方不平时也能瞄到
             if dy:
                 drag_look(s, W // 2, H // 2, dy)
             a0 = changed_count(s)
@@ -1370,6 +1375,11 @@ def scene_base(u):
     y1 = pose(s)[1]
     d1 = changed_count(s)
     挖了, 掉了 = d1 - d0, y0 - y1
+    drag_pitch(-0.15)                    # 视角摆回接近水平
+    s.ev("window.__T.keydown('KeyS','s');")
+    time.sleep(1.1)                      # 往后退两步，离开自己挖的那个坑边
+    s.ev("window.__T.keyup('KeyS','s');")
+    time.sleep(0.6)
     sk_c, bl_c, _ = lights()
     # 拖不动视角就不挖（判据前提不成立），标不作数：这台机器上鼠标拖拽俯仰时灵时不灵 ——
     # 同一份代码一轮能拖到 -1.317，下一轮拖 6 次纹丝不动 -0.15。把"我拖不动"算成"产品没洞穴"
@@ -1629,8 +1639,16 @@ def scene_touch(u):
     tap(tid, right[0], right[1], gap=0.1, after=0.16); tid += 1
     tap(tid, right[0], right[1], gap=0.1, after=1.0); tid += 1
     mode = hud_field(s, 2)
+    试了两下 = 0
+    while "飞行" not in str(mode) and 试了两下 < 2:
+        # 双击判据本来踩在 0.35 秒窗口边上（gap 0.1 + 第一下落地 0.16 + 事件派发延迟），
+        # 偶尔一两对没算上是时序，不是产品：最多再试两对，每对都算一次独立双击。
+        试了两下 += 1
+        tap(tid, right[0], right[1], gap=0.12, after=0.17); tid += 1
+        tap(tid, right[0], right[1], gap=0.12, after=1.0); tid += 1
+        mode = hud_field(s, 2)
     log("手机端触摸", "双击屏幕会开飞行（旧版说明里有、代码里没有）", "飞行" in mode,
-        "模式=%s（两下间隔 %.2f 秒）" % (mode, time.time() - t0))
+        "模式=%s（两下间隔 %.2f 秒，一共试了 %d 对）" % (mode, time.time() - t0, 1 + 试了两下))
     tap(tid, right[0], right[1], gap=0.1, after=0.16); tid += 1
     tap(tid, right[0], right[1], gap=0.1, after=1.0); tid += 1
     log("手机端触摸", "再双击会关掉飞行", "飞行" not in hud_field(s, 2), "模式=%s" % hud_field(s, 2))

@@ -1115,7 +1115,7 @@ function pushLook(ev) {
   if (!lookFree || !window.__MCL_BOOTED || !ev) return;
   if (ev.buttons !== 0) { lookHaveLast = false; return; }     // 按着的时候不转向
   var dx = 0, dy = 0;
-  if (lookLocked && typeof ev.movementX === 'number' && (ev.movementX !== 0 || ev.movementY !== 0)) {
+  if (lookLocked && !window.__MCL_LOCK_TEST && typeof ev.movementX === 'number' && (ev.movementX !== 0 || ev.movementY !== 0)) {
     dx = ev.movementX;
     dy = ev.movementY;
   } else {
@@ -1344,6 +1344,44 @@ function watchBoot() {
     // 要么它有但不能用。(any-pointer: coarse) 更实在 —— 真能用手指头点的设备才叫 coarse。
     var touchish = isTouchish();
     lookFree = !touchish;   // 桌面才走「移动鼠标就转向」；触屏走右半屏拖动
+
+    // 桌面：把鼠标"锁"进画布（Pointer Lock）。锁上以后光标看不见、也不会跑出画布外，
+    // 而且浏览器照样一直送 mousemove —— 以前光标划到画布外面视角就转不动了，这半条老毛病
+    // 就是这么来的。解锁：Esc（浏览器自己管）或 Tab（我们加的开关）；再锁上点一下画布就行。
+    if (!touchish && document.addEventListener) {
+      try {
+        var hdHint = $('hint-desktop');
+        if (hdHint) {
+          var lockSpan = document.createElement('span');
+          lockSpan.id = 'lock-state';
+          hdHint.appendChild(document.createTextNode(' · '));
+          hdHint.appendChild(lockSpan);
+          var lockSay = function () {
+            lockSpan.textContent = lookLocked
+              ? '鼠标已锁在画布里（Tab 或 Esc 唤出光标）'
+              : '按 Tab 把鼠标锁进画布（光标消失、跑不出去）';
+          };
+          lockSay();
+          document.addEventListener('pointerlockchange', lockSay, false);
+        }
+        window.addEventListener('keydown', function (ev) {
+          if (!ev) return;
+          var k = ev.key || '';
+          var code = ev.keyCode || ev.which || 0;
+          if (k !== 'Tab' && code !== 9) return;
+          var tg = ev.target || ev.srcElement;
+          if (tg && (tg.tagName === 'INPUT' || tg.tagName === 'TEXTAREA')) return;
+          if (lookLocked) {
+            try { document.exitPointerLock(); } catch (e) {}
+          } else {
+            requestLookLock();     // 浏览器要求"用户手势"才给锁：键盘按下算手势
+          }
+          // Tab 默认会把焦点挪到下一个 DOM 元素上（页面上有好几个按钮），我们只要它开关鼠标
+          if (ev.preventDefault) ev.preventDefault();
+          if (ev.stopPropagation) ev.stopPropagation();
+        }, false);
+      } catch (e) {}
+    }
     var hd = $('hint-desktop');
     var ht = $('hint-touch');
     if (touchish) {
@@ -1587,11 +1625,15 @@ function wireButtons() {
         lookLocked = (document.pointerLockElement === $('glcanvas'));
         lookHaveLast = false;
       }, false);
-      document.addEventListener('pointerlockerror', function () { lookLocked = false; }, false);
+      document.addEventListener('pointerlockerror', function () {
+        lookLocked = false;
+        // 锁不上要留个计数：出问题时能分清"浏览器不给锁"和"我们的代码没跑"。
+        window.__MCL_LOCK_ERR = (window.__MCL_LOCK_ERR || 0) + 1;
+      }, false);
       var gl0 = $('glcanvas');
       if (gl0 && gl0.addEventListener) {
         gl0.addEventListener('mousedown', function (ev) {
-          if (lookFree && !lookLocked && ev.button === 0) requestLookLock();
+          if (lookFree && !lookLocked && !window.__MCL_AUTOLOCK_OFF && ev.button === 0) requestLookLock();
         }, false);
       }
     } catch (e) {}
