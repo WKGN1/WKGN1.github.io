@@ -246,6 +246,35 @@ body {
 /* Rust 推的第 8 段（飞行提示之类）。空的时候 JS 会把它 hidden 掉，不留空块。 */
 /* 快捷栏：贴着画面下边缘。HUD 整体是 pointer-events:none，这一坨要单独开回来才能点。
    9 格得在 390 宽的手机上排得下，所以每格给的是「能缩的下限」而不是一口价宽度。 */
+/* 手机摇杆：左下一个圆盘 + 一颗跟手的珠子。pointer-events:none —— 它只是给眼睛看的，
+   真正的判定在 Rust 那边按触摸坐标做，别让这块 DOM 把触摸吞了。 */
+#stick-pad {
+  pointer-events: none;
+  position: absolute;
+  left: 6vw;
+  bottom: 12vh;
+  width: 26vw;
+  max-width: 34vh;
+  height: 26vw;
+  max-height: 34vh;
+  border-radius: 50%;
+  border: 0.18rem solid rgba(255, 255, 255, 0.34);
+  background: rgba(20, 24, 30, 0.26);
+  z-index: 6;
+}
+
+#stick-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 46%;
+  height: 46%;
+  margin: -23% 0 0 -23%;
+  border-radius: 50%;
+  background: rgba(232, 236, 242, 0.52);
+  border: 0.14rem solid rgba(20, 24, 30, 0.42);
+}
+
 .g-hot {
   pointer-events: auto;
   align-self: center;

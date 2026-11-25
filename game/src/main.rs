@@ -88,6 +88,8 @@ extern "C" {
     fn mcl_take_jump() -> i32;
     fn mcl_take_fly() -> i32;
     fn mcl_take_slot() -> i32;
+    /// 手机摇杆几何（CSS 像素）：轴 0=圆心x 1=圆心y 2=半径。页面没装摇杆时半径给 0，
+    /// Rust 就退回"左半屏走路"的老规矩（桌面本来也不走触摸这条路）。
     /// 1 = 手机端 HUD 上那个「潜行」按钮**正被按着**（按住型：按着就一直给 1，松手变 0）。
     /// 跟 jump 那种「取走即清」不一样：潜行是个状态，不是一下。
     fn mcl_sneak_held() -> i32;
@@ -106,8 +108,32 @@ pub extern "C" fn mcl_bridge_crate_version() -> u32 {
     1
 }
 
+// 摇杆几何这个桥函数只在 wasm 目标上声明（放进上面那个 env 块会让
+// `cargo test` 也去链接它，非 wasm 目标上压根没有这个导入，直接编译失败）。
+// 这儿用 // 不用 ///：extern 块上挂文档注释会警告（文档挂不到东西上）。
+// 必须带 #[link(wasm_import_module = "env")]：不带的话 rust-lld 找不到这个导入
+// （它在宿主的 "env" 模块里），报 undefined symbol 直接链接失败。
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "env")]
+extern "C" {
+    fn mcl_stick_geo(axis: u32) -> f32;
+}
+
 mod bridge {
     use super::*;
+
+
+    /// 摇杆几何：圆心 + 半径（画布坐标）。页面没给的时候半径 0 = 老规矩。
+    pub fn stick_geo() -> (f32, f32, f32) {
+        #[cfg(target_arch = "wasm32")]
+        unsafe {
+            (mcl_stick_geo(0), mcl_stick_geo(1), mcl_stick_geo(2))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            (0.0, 0.0, 0.0)
+        }
+    }
 
     #[inline]
     fn send(s: &str) {
@@ -1040,15 +1066,46 @@ impl Game {
             self.world.sky_light(lex, ley, lez),
             self.world.block_light(lex, ley, lez),
         );
+        // 尾巴上的自动化通道（和 yaw/pitch 一样是给判据读的，不是调试残留）：
+        // g = 页面给 Rust 的圆盘（圆心,圆心,半径），判据照它算按下点、核对落点；
+        // t = 摇杆正记着的手指 id（-1 = 没记着），判据靠它分辨"没认下"和"认下了推得不够"。
+        let (g2s, g2sy, g2r) = bridge::stick_geo();
+        let tm_dbg: i64 = self.touch_move.as_ref().map_or(-1, |m| m.0 as i64);
+        // 再加一条：Rust 这帧**真的**看见了几根手指、各在哪个坐标、什么阶段。
+        // 判据发的触摸是画布逻辑坐标，若 macroquad 交给我们的是另一套尺，这儿一比就露馅。
+        let raw_dbg: String = touches()
+            .iter()
+            .take(3)
+            .map(|t| {
+                let ph = match t.phase {
+                    TouchPhase::Started => 'b',
+                    TouchPhase::Moved => 'm',
+                    TouchPhase::Stationary => 's',
+                    TouchPhase::Ended => 'e',
+                    TouchPhase::Cancelled => 'c',
+                };
+                format!(
+                    " {}:{}({:.0},{:.0}){}",
+                    t.id,
+                    "",
+                    t.position.x,
+                    t.position.y,
+                    ph
+                )
+            })
+            .collect::<String>();
+        let scr_dbg = format!("{:.0}x{:.0}", screen_width(), screen_height());
         let pos = format!(
-            "x{:.2} y{:.2} z{:.2} yaw{:.3} pitch{:.3} wf{} br{} sk{} bl{}",
+            // 尾巴上挂一组自动化通道（g=页面给的圆盘 t=摇杆记着的手指，[宽x高 触摸们]=原始转储）。
+            "x{:.2} y{:.2} z{:.2} yaw{:.3} pitch{:.3} wf{} br{} sk{} bl{} g{:.0},{:.0},{:.0} t{} [{} {}]",
             self.player.pos[0],
             self.player.pos[1],
             self.player.pos[2],
             self.player.yaw,
             self.player.pitch,
             self.water_frame,
-            self.bright, lsx, lblk
+            self.bright, lsx, lblk, g2s, g2sy, g2r, tm_dbg,
+            scr_dbg, raw_dbg
         );
         let sel = self.inv.selected_slot();
         let held = if self.creative {
@@ -1171,6 +1228,17 @@ fn read_mouse(g: &mut Game, dt: f32) {
     }
 }
 
+/// 摇杆命中判定（几何来自页面）。半径 <= 0 表示页面没装摇杆（桌面、或者胶水没更新）：
+/// 退回老规矩 —— 左半屏算摇杆。测试只盖半径为正的那条路（无窗口时 screen_width 不可靠）。
+fn stick_contains(scx: f32, scy: f32, sr: f32, p: Vec2) -> bool {
+    if sr <= 0.0 {
+        return p.x < screen_width() * 0.45;
+    }
+    let dx = p.x - scx;
+    let dy = p.y - scy;
+    dx * dx + dy * dy <= sr * sr
+}
+
 /// 右半屏的一根手指。held 是按住秒数，moved 是累计位移（像素）。
 /// dragging：位移已经越过「还在拖」的门槛，这次按放置永久取消（见下面的 aged 循环）。
 #[derive(Clone, Copy)]
@@ -1183,23 +1251,51 @@ struct LookTouch {
     dragging: bool,
 }
 
-/// 触屏：左半屏摇杆走路，右半屏拖动转向，轻点挖、按住放。
-/// 每半屏只认一根手指：多指同时按着时第二根只是重复记账，会把视角转成两倍快。
+/// 触屏：左下那个画出来的摇杆走路，屏幕其余地方全都转向，轻点挖、按住放。
+/// 每个角色只认一根手指：多指同时按着时第二根只是重复记账，会把视角转成两倍快。
+/// 摇杆的归属按"这根手指一开始是不是按在摇杆上"算（跟着手指走，手指划出圈也不换角色），
+/// 不然拖到圈外那一刻就会变成转视角、松手还停不下来。
 /// 返回摇杆给出的移动意图（已按当前朝向转过，和键盘的 wish_from_keys 同一套基）。
 fn read_touch(g: &mut Game, dt: f32) -> Option<[f32; 3]> {
-    let w = screen_width();
+    let (scx, scy, sr) = bridge::stick_geo();
+
+    // 每帧核对：记着的那根手指要是已经不在屏上了（手机浏览器漏发一次抬手是常事），
+    // 就直接忘掉它。以前是死等 —— 后来真按着的那根被当成"第二根"不理，
+    // 玩家拖着拖着突然转不动，抬起来重按才好，就是这么来的。
+    if !g.look.is_empty() {
+        let live: Vec<u64> = touches().iter().map(|t| t.id).collect();
+        g.look.retain(|l| live.contains(&l.id));
+    }
 
     for t in touches() {
-        let left = t.position.x < w * 0.45;
+        // 归属先看"是不是这根手指正被摇杆记着"，再看它现在落在哪：摇杆那根划出圈也还是摇杆
+        let owned = g.touch_move.map_or(false, |m| m.0 == t.id);
+        // 「屏上还有没有活着的转向手指」：按下和拖动两支都要用，所以在 match 之前先算好。
+        // 判的是**现在还在屏上的**那些，不是"游戏记着的那些"：记着的可能是一根已经被
+        // 浏览器吞掉抬手的死手指，信它会白占位置、把接管挡死。
+        let look_busy = touches()
+            .iter()
+            .any(|l| g.look.iter().any(|k| k.id == l.id));
+        // 圆盘压在快捷栏上面是**故意的**（手机底下那一排手指够得着，圆盘也得够得着）。
+        // 所以手指按在圆盘上就先算走路摇杆，哪怕它同时也压在格子上：
+        // 真人要点格子的时候浏览器自己会把那一下交给格子 DOM，根本到不了画布；
+        // 到得了画布的按下都是"想走路"。真机上这条重叠也极小（实测只有圆边上指甲盖大一块）。
+        // 底栏命中判定留着是给格子附近那些擦边的按下做次要参考的（见下条 look 的判据）。
+        let left = owned || stick_contains(scx, scy, sr, t.position);
         match t.phase {
             TouchPhase::Started => {
+                // 新按下的手指按哪儿都不重要，先看有没有"活着的转向手指"（look_busy）：
+                // 有就不抢（否则双指同时转，视角两倍快 —— 这条老判据就是抓这个的）。
                 if left {
                     if g.touch_move.is_none() {
-                        g.touch_move = Some((t.id, t.position, t.position));
+                        // 圆心用画出来的那个固定圆心，不是手指按下的位置：这样"拖多远 = 走多快"
+                        // 和屏幕上那颗珠子对得上，玩家看珠子就知道自己推了多少。
+                        let c = if sr > 0.0 { vec2(scx, scy) } else { t.position };
+                        g.touch_move = Some((t.id, c, t.position));
                     }
-                } else if g.look.is_empty() {
-                    // 只收第一根。后面几根手指是玩家手滑或多指按住，
-                    // 再 push 一份就会各算各的位移，视角转两倍快。
+                } else if !look_busy {
+                    // 只收第一根（look_busy 已经保证屏上没有活着的转向手指）。
+                    // 后面几根手指是玩家手滑或多指按住，再 push 一份就会各算各的位移，视角转两倍快。
                     g.look.push(LookTouch {
                         id: t.id,
                         last: t.position,
@@ -1210,13 +1306,15 @@ fn read_touch(g: &mut Game, dt: f32) -> Option<[f32; 3]> {
                     });
                 }
             }
-            TouchPhase::Moved => {
-                if left {
-                    if let Some((id, origin, cur)) = g.touch_move.as_mut() {
-                        if *id == t.id {
-                            *cur = t.position;
-                            let _ = origin;
-                        }
+            TouchPhase::Moved | TouchPhase::Stationary => {
+                // Stationary 也按移动那一档处理：Firefox 的触摸合成路径只会报 started / stationary
+                // （真机浏览器才会报 moved），少了这一档的话——摇杆永远抓不到手指、
+                // 转向也只认得按下不认得拖动。真机上这档几乎不出现，出现也只是"没动的新帧"，
+                // 处理成"更新到当前点"两者都一样正确。
+                if owned {
+                    // 摇杆那根手指划到哪儿都继续算摇杆（跟手，不按当前落点换角色）
+                    if let Some((_, _, cur)) = &mut g.touch_move {
+                        *cur = t.position;
                     }
                 } else if let Some(l) = g.look.iter_mut().find(|l| l.id == t.id) {
                     let d = t.position - l.last;
@@ -1230,17 +1328,26 @@ fn read_touch(g: &mut Game, dt: f32) -> Option<[f32; 3]> {
                     // 手指往哪儿拖，视角就往哪儿转：和桌面同一套符号（phys::turn_yaw_pitch）。
                     let sens = std::f32::consts::PI / 420.0;
                     phys::turn_yaw_pitch(&mut g.player.yaw, &mut g.player.pitch, d.x, d.y, sens);
+                } else if !look_busy {
+                    // 接管：原来记着的那根手指已经不在屏上了（手机浏览器漏发一次抬手是常事），
+                    // 这根还按着在拖 —— 直接改认这根，玩家不用整根抬起来重按。
+                    // 起点必须落在**这根手指现在的位置**上：拿它按下时的旧点算位移，
+                    // 会瞬间倾泻一长串陈年位移，视角猛抽一下（修好一个卡、又造出一个乱跳）。
+                    // 摇杆那根不算（它有自己的角色，见上面 owned）。
+                    g.look.push(LookTouch {
+                        id: t.id,
+                        last: t.position,
+                        held: 0.0,
+                        moved: 0.0,
+                        placed: false,
+                        dragging: false,
+                    });
                 }
             }
-            // 手指按着没动：保持现状就行，摇杆和视角都不需要更新
-            TouchPhase::Stationary => {}
             TouchPhase::Ended | TouchPhase::Cancelled => {
-                if left {
-                    if let Some((id, _, _)) = g.touch_move {
-                        if id == t.id {
-                            g.touch_move = None;
-                        }
-                    }
+                if owned {
+                    // 摇杆那根抬手：不管手最后停在圈里还是圈外，都必须清掉，不然走路停不下来
+                    g.touch_move = None;
                 } else {
                     // 抬手时既没长按触发放置、也没怎么移动，就当一次「挖」。
                     let hit = g.look.iter().find(|l| l.id == t.id).copied();
@@ -1289,9 +1396,12 @@ fn read_touch(g: &mut Game, dt: f32) -> Option<[f32; 3]> {
 
     if let Some((_, origin, cur)) = g.touch_move {
         let d = cur - origin;
-        if d.length() >= 8.0 {
+        // 死区/满程都跟着画出来的半径走：珠子推到圈边 = 满速，推一点点 = 慢走
+        let full = if sr > 0.0 { sr } else { 52.0 };
+        let dead = full * 0.15;
+        if d.length() >= dead {
             let len = d.length();
-            let k = len.min(52.0) / 52.0 / len;
+            let k = len.min(full) / full / len;
             // 摇杆量出来的是「屏幕方向」，得按当前朝向换成世界方向，和键盘那套基一模一样：
             // 屏幕向上 = 往前，屏幕向右 = 往右（yaw=0 时前向是 +Z，见 phys::look_dir）。
             // 原来直接写 [d.x, 0, d.y]：既没转朝向，又因为屏幕 y 向下为正，
@@ -1677,6 +1787,33 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 摇杆判定认圆心那一圈不认半屏() {
+        let c = vec2(100.0, 200.0);
+        assert!(stick_contains(c.x, c.y, 50.0, vec2(100.0, 200.0)), "正圆心当然算摇杆");
+        assert!(stick_contains(c.x, c.y, 50.0, vec2(145.0, 200.0)), "圈边内 5 像素算摇杆");
+        // 30-40-50 是勾股数：斜着到圈边在浮点上也是精确的 50，不会因为我多点少点一个像素翻面
+        assert!(stick_contains(c.x, c.y, 50.0, vec2(130.0, 240.0)), "斜着到圈边也算（半径是各向同性的）");
+        assert!(!stick_contains(c.x, c.y, 50.0, vec2(151.0, 200.0)), "出圈 1 像素就该算转向（半径是硬边，不吞手指）");
+        assert!(!stick_contains(c.x, c.y, 50.0, vec2(100.0, 251.0)), "正下方出圈同样算转向");
+        assert!(!stick_contains(c.x, c.y, 50.0, vec2(10.0, 200.0)), "圆心左边 90 像素早出圈了");
+        assert!(stick_contains(c.x, c.y, 50.0, vec2(135.35, 235.35)), "差一点点到圈边，仍在圈内");
+    }
+
+    #[test]
+    fn 摇杆判定对负坐标和极大半径也不能算错() {
+        assert!(stick_contains(-500.0, -900.0, 10.0, vec2(-505.0, -908.0)), "负坐标照样按距离算");
+        assert!(!stick_contains(-500.0, -900.0, 10.0, vec2(-489.0, -900.0)), "负坐标出圈也要出圈");
+        assert!(
+            stick_contains(0.0, 0.0, 100000.0, vec2(99999.0, 0.0)),
+            "半径极大时圈内在数学上还是圈内（不能因为数大就漏判）"
+        );
+        assert!(
+            !stick_contains(0.0, 0.0, 100000.0, vec2(100001.0, 0.0)),
+            "同理出圈就是出圈，数大不能把它拉回圈内"
+        );
+    }
 
     /// HUD 那个钟得跟明暗对得上。以前夜不真黑，钟和光各说各话没人看得出来；
     /// 现在夜是黑的，钟写「13:30」而外面一片黑就是明显的自相矛盾，所以钉住几个点。

@@ -222,6 +222,9 @@ window.__T = {
   tstart: function(id, x, y){ return this.touch('touchstart', [[id, x, y]]); },
   tmove: function(id, x, y){ return this.touch('touchmove', [[id, x, y]]); },
   tend: function(id, x, y){ return this.touch('touchend', [[id, x, y]]); },
+  // 吞事件模拟：发一个 touchend 但**列表是空的** —— 游戏在这一帧里既没看见这根手指的
+  // 移动、也没看见它的抬手，下一帧起 touches() 里根本没它。手机浏览器漏发抬手就是这个样子。
+  tendGone: function(id){ return this.touch('touchend', []); },
   key: function(code, key){
     var c = document.getElementById('glcanvas');
     c.dispatchEvent(new KeyboardEvent('keydown', {bubbles: true, code: code, key: key}));
@@ -485,6 +488,113 @@ def fresh_boot(s, u, total_dy):
     if total_dy:
         drag_look(s, W // 2, H // 2, total_dy)
     return t_boot, max(W, 0)
+
+
+def wait_screen_stable(s, gap=0.4, need=5, budget=25.0):
+    """等游戏自己报的画面尺寸**真的定下来**再动手算几何。boot 完画布还在一档一档长
+    （无头实测：会一路长到 1198x523 这种数字），而且长得比 HUD 读数快 —— HUD 连着两次读到
+    同一个数不代表它歇了。所以要求连续 5 次（约 2 秒）都一样才算稳；不稳就一直等到预算用完。
+    这一步不能省：圆盘位置和按下的手指都按这把尺算，尺在长就全偏，走路量到 0 格。"""
+    t0 = time.time()
+    run, last, best = 0, None, None
+    while time.time() - t0 < budget:
+        cur = game_screen(s)
+        if cur:
+            best = cur
+            if cur == last:
+                run += 1
+                if run >= need:
+                    return cur
+            else:
+                run = 0
+            last = cur
+        time.sleep(gap)
+    return best
+
+
+def _取(d, k, 默认):
+    """从 locals() 里取一个可能压根没被赋过值的诊断变量，取不到就用默认值。
+    取证代码不许因为'这条分支没走到'而崩。"""
+    v = d.get(k)
+    return 默认 if v is None else v
+
+
+def to_css(s, cx, cy):
+    """把游戏那把尺上的点换算回判据发触摸用的窗口/CSS 坐标（问的是胶水，它量着画布）。"""
+    v = s.ev("return (window.__MCL_TO_CSS_X && window.__MCL_TO_CSS_Y) ?"
+             " [Math.round(window.__MCL_TO_CSS_X(%d)), Math.round(window.__MCL_TO_CSS_Y(%d))] : null;"
+             % (int(cx), int(cy)))
+    return v
+
+
+def one_frame(s, tid):
+    """一次 HUD 读取里同时拿到【游戏画面尺寸 / 游戏报的圆 / 那根手指在这一帧的坐标 / 摇杆记着谁】。
+    分开读会读到不同帧 —— 我前面几轮就是这么被骗的：圆是这一帧的、手指是那一帧的，
+    两个数一减就说"手指在圈外"，其实它们压根不在同一把尺的同一年代。"""
+    tail = str(hud_field(s, 8) or "")
+    out = {}
+    m = re.search(r"\[(\d+)x(\d+)", tail)
+    if m:
+        out["画面"] = [int(m.group(1)), int(m.group(2))]
+    m = re.search(r"g(-?\d+),(-?\d+),(-?\d+)", tail)
+    if m:
+        out["圆"] = [int(m.group(1)), int(m.group(2)), int(m.group(3))]
+    m = re.search(r" t(-?\d+)", tail)
+    if m:
+        out["摇杆"] = int(m.group(1))
+    m = re.search(r"%d:\((-?\d+),(-?\d+)\)(\w)" % int(tid), tail)
+    if m:
+        out["手指"] = [int(m.group(1)), int(m.group(2)), m.group(3)]
+    m = re.search(r" yaw(-?\d+\.\d+) ", tail)
+    if m:
+        out["yaw"] = float(m.group(1))
+    return out
+
+
+def stick_owner(s):
+    """HUD 尾巴上的 t 字段：摇杆现在记着哪根手指（-1 = 没记着）。
+    走路判据靠它分辨『游戏压根没把这根手指当摇杆』和『当摇杆了但推得不够』——
+    这两种情况的修法完全不一样，我前面几轮就是缺这个证据在猜。"""
+    tail = str(hud_field(s, 8) or "")
+    m = re.search(r" t(-?\d+)", tail)
+    return None if not m else int(m.group(1))
+
+
+def raw_touch(s, tid):
+    """从 HUD 尾巴读 macroquad **这一帧真的收到的**那根手指的坐标和阶段。
+    判据按哪个坐标发、游戏落到哪个坐标，两边一对就看清了中间那层换算 —— 我这儿已经
+    猜歪过三轮（CSS 尺、画布缓冲尺、稳定后的尺），别再猜了，直接看。"""
+    tail = str(hud_field(s, 8) or "")
+    m = re.search(r"%d:\((-?\d+),(-?\d+)\)(\w)" % int(tid), tail)
+    if not m:
+        return None
+    return [int(m.group(1)), int(m.group(2)), m.group(3)]
+
+
+def fed_circle(s):
+    """从 HUD 第 9 段尾巴读 Rust 这一帧**真的**拿到的圆盘（g圆心,圆心,半径）。
+    按下就照这个数下 —— 中间隔着胶水的换算，判据自己算的那份只能当草稿。"""
+    tail = str(hud_field(s, 8) or "")
+    m = re.search(r"g(-?\d+),(-?\d+),(-?\d+)", tail)
+    if not m:
+        return None
+    return [int(m.group(1)), int(m.group(2)), int(m.group(3))]
+
+
+def game_screen(s):
+    """从 HUD 第 9 段尾巴读游戏自己报的画面尺寸（Rust 量触摸就用这把尺）。
+    尾巴格式：`... g圆心,圆心,半径 t? [宽x高 触摸们]`。读不到返回 None。"""
+    tail = hud_field(s, 8) or ""
+    m = re.search(r"\[(\d+)x(\d+)", str(tail))
+    if not m:
+        return None
+    return [int(m.group(1)), int(m.group(2))]
+
+
+def yaw_of(s):
+    """yaw 读数（HUD 第 9 段第一位）。转向类判据都要拿它做差，得先折到 (-pi, pi]。"""
+    p = pose(s)
+    return None if not p or len(p) < 4 else p[3]
 
 
 def scene_base(u):
@@ -1361,7 +1471,8 @@ def scene_base(u):
     #                                      洞挖在人前面、人站在边上不掉下去（上一轮就是这么 0 下降）
     time.sleep(0.4)
     pitch_in = pitch_of()
-    y0 = pose(s)[1]
+    p_start = pose(s)
+    y0 = p_start[1]
     d0 = changed_count(s)
     for _ in range(3):  # 挖八刀 → 往前挪半步掉进自己挖开的坑 → 再挖：下洞本来就是这么下的
         for _ in range(8):
@@ -1372,7 +1483,8 @@ def scene_base(u):
         s.ev("window.__T.keyup('KeyW','w');")
         time.sleep(0.45)
     time.sleep(1.8)
-    y1 = pose(s)[1]
+    p_end = pose(s)
+    y1 = p_end[1]
     d1 = changed_count(s)
     挖了, 掉了 = d1 - d0, y0 - y1
     drag_pitch(-0.15)                    # 视角摆回接近水平
@@ -1384,17 +1496,25 @@ def scene_base(u):
     # 拖不动视角就不挖（判据前提不成立），标不作数：这台机器上鼠标拖拽俯仰时灵时不灵 ——
     # 同一份代码一轮能拖到 -1.317，下一轮拖 6 次纹丝不动 -0.15。把"我拖不动"算成"产品没洞穴"
     # 是判据的错。洞穴本身由 4 条 Rust 单元测试 + 静态判据钉着，不靠这条。
-    判空腔 = None if not 拖到位 else (挖了 >= 6 and 掉了 >= 挖了 + 2)
+    # 另一个前提：人得留在自己挖的那一列里。往前挪那半步可能把人抬上坑边的台阶
+    # （2026-11-26 实测一轮：挖了 19 刀、人反而升了一格，y 20→21）—— 人在竖井外面，
+    # "掉下去的格数"就无从比起，和俯角没拖到位一样标不作数，不硬判红。
+    人在井里 = y1 <= y0 + 0.5
+    判空腔 = None if (not 拖到位 or not 人在井里) else (挖了 >= 6 and 掉了 >= 挖了 + 2)
+    不作数 = ("" if (拖到位 and 人在井里)
+              else "；【%s，这条不作数】"
+              % ("俯角没拖到位" if not 拖到位 else "走完人升上了坑边（没留在挖的列里）"))
     log("洞穴", "往下挖能掉进空腔：掉下去的格数比挖的刀数还多（多出来那几格本来就是空的）",
         判空腔,
-        "从 y=%.2f 挖到 y=%.2f：挖了 %d 刀、掉了 %.2f 格（多出 %.2f 格算空腔）；挖之前俯角=%s 挖完=%s；"
-        "当时模式=%s 手里=%s 第 9 段尾巴=%s%s" % (y0, y1, 挖了, 掉了, 掉了 - 挖了, pitch_in, pitch_of(),
-                                               hud_field(s, 2), hud_field(s, 1), str(hud_field(s, 8))[-30:],
-                                               "" if 拖到位 else "；【俯角没拖到位，这条不作数】"))
+        "从 (%.2f,y=%.2f,z=%.2f) 挖到 (%.2f,y=%.2f,z=%.2f)：挖了 %d 刀、掉了 %.2f 格（多出 %.2f 格算空腔）；"
+        "挖之前俯角=%s 挖完=%s；当时模式=%s 手里=%s 第 9 段尾巴=%s%s"
+        % (p_start[0], p_start[1], p_start[2], p_end[0], p_end[1], p_end[2],
+           挖了, 掉了, 掉了 - 挖了, pitch_in, pitch_of(),
+           hud_field(s, 2), hud_field(s, 1), str(hud_field(s, 8))[-30:], 不作数))
     log("洞穴", "挖到深处方块光该被岩浆抬起来（洞穴里有天然光源，不用先摆灯）",
-        (None if not 拖到位 else (bl_c is not None and bl_c >= 4)),
-        "站在挖到底那一格：方块光 bl=%s（天光 sk=%s）—— 上面那一列是我自己挖开的竖井，天光高不奇怪"
-        % (bl_c, sk_c))
+        (None if (not 拖到位 or not 人在井里) else (bl_c is not None and bl_c >= 4)),
+        "站在挖到底那一格：方块光 bl=%s（天光 sk=%s）—— 上面那一列是我自己挖开的竖井，天光高不奇怪%s"
+        % (bl_c, sk_c, "" if 人在井里 else "；【走完人升上了坑边，这条不作数】"))
 
     errs = s.ev("return window.__T.errs();")
     log("桌面基础", "这一轮交互没有报错", not errs, "｜".join(errs[:3])[:160])
@@ -1491,6 +1611,23 @@ def scene_touch(u):
     right = [int(W * 0.72), int(H * 0.55)]
     left = [int(W * 0.22), int(H * 0.62)]
 
+    # ---- 摇杆圆盘几何注入 ----
+    # 无头 Firefox 报不出触屏能力（判据里试过 wrappedJSObject/改原型都塞不进页面作用域），
+    # 页面不会自己长出圆盘，只能从外面把几何喂进来 —— 不喂的话这几条触摸判据测的还是老规矩。
+    # 一切按**画布的 CSS 方块**算，不按窗口算：画布在页面里未必铺满窗口（无头这儿窗口 500x674，
+    # 画布 CSS 只有 484x503 还偏下偏右），按窗口算整套几何会偏一截。
+    # 圆盘比例照 game.css 里 #stick-pad 抄：left:6vw + 半径 13vw → 圆心 19vw；
+    # bottom:12vh → 圆心距底 12vh + 半径；半径 = min(13vw, 17vh)。
+    画布 = s.ev("return (function(){var c=document.getElementById('glcanvas'); var r=c.getBoundingClientRect();"
+                "return [Math.round(r.width), Math.round(r.height)];})();")
+    cw, ch = int(画布[0]), int(画布[1])
+    半径 = int(min(cw * 0.13, ch * 0.17))
+    force = [int(cw * 0.19), ch - int(ch * 0.12) - 半径, 半径]
+    s.ev("window.__MCL_STICK_FORCE = [%d, %d, %d]; return 1;" % (force[0], force[1], force[2]))
+    stick = [force[0], force[1], force[2]]
+    right = [int(cw * 0.72), int(ch * 0.55)]   # 转向区：画布右侧（老规矩那半屏其实就是这块）
+    left = [force[0], force[1]]                # 摇杆圆心（"左半屏中点"那条老规矩已作废）
+
     touch_env = s.ev("return (('ontouchstart' in window) || navigator.maxTouchPoints > 0 ||"
                      " (window.matchMedia && window.matchMedia('(any-pointer: coarse)').matches)) ? 1 : 0;")
     # 无头 Firefox 报不出触屏能力：ontouchstart 不在 window 里、maxTouchPoints 是 0、
@@ -1517,6 +1654,16 @@ def scene_touch(u):
         time.sleep(gap)                     # 按住时长是靠过帧累计的，同一拍里发完等于 0 秒
         s.ev("window.__T.tend(%d, %d, %d);" % (tid, x, y))
         time.sleep(after)
+
+    def hold_move(tid, x, y, dx, dy, ms):
+        """按住拖到 (x+dx, y+dy) 并保持 ms 毫秒，返回结束时的手指 id（调用方自己 tend）。"""
+        s.ev("window.__T.tstart(%d, %d, %d);" % (tid, x, y))
+        time.sleep(0.12)
+        for k in range(1, 7):
+            s.ev("window.__T.tmove(%d, %d, %d);" % (tid, x + dx * k // 6, y + dy * k // 6))
+            time.sleep(0.05)
+        time.sleep(max(0.0, ms / 1000.0 - 0.42))
+        return tid
 
     # 出生是平视，准星可能只对着天空：先压视角，直到真能挖动
     tid, total = 1, 0
@@ -1633,6 +1780,258 @@ def scene_touch(u):
     b = s.ev("return window.__T.sig();")
     log("手机端触摸", "慢速拖右半屏只转视角、不白掉方块", n4 == n3,
         "改动 %d → %d，视角变化 Δratio=%.4f" % (n3, n4, abs(b["ratio"] - a["ratio"]) if "err" not in a and "err" not in b else -1))
+
+    # ---- 摇杆：拖它要真走路，松手要真停下 ----
+    # 走路要物理在跑：面板开着就是暂停，前面那段开过物品栏，先把面板收掉再测。
+    s.ev("window.__MCL_INV_OPEN(0);")
+    time.sleep(0.6)
+    面板 = s.ev("return (function(){var e=document.getElementById('inv-panel');return e?(e.hidden?'closed':'open'):'none';})();")
+    # 前置条件：前面的挖掘/放置两条判据在玩家当前朝向里埋了雷——挖掘测试挖掉的正是玩家
+    # 重心脚下的那格（玩家因此掉一格），放置测试的长按又把一个方块补在玩家脚前 0.2 格的
+    # 脚面高度（存档 diff 实测落在 (52,19,38)）。朝前走 0.2 格就顶死（实测位移 0.28）。
+    # 实测开放方向是背后（≥3 格），所以先转一个 π 再测：右半屏拖 150+150+120=420px，
+    # Δyaw=-420×(π/420)=-π（每段都不出窗口右缘 500px；转不转得动下面会用 yaw 变化核对）。
+    yaw转前 = pose(s)[3]
+    for 步长 in (150, 150, 120):
+        s.ev("window.__T.tstart(%d, %d, %d);" % (tid, right[0], right[1]))
+        time.sleep(0.1)
+        for k in range(1, 7):
+            s.ev("window.__T.tmove(%d, %d, %d);" % (tid, right[0] + 步长 * k // 6, right[1]))
+            time.sleep(0.05)
+        s.ev("window.__T.tend(%d, %d, %d);" % (tid, right[0] + 步长, right[1]))
+        time.sleep(0.3)
+        tid += 1
+    time.sleep(0.4)
+    # 摇杆测试自己的起点位姿（p0 是更早的转向/挖掘测试之前抓的，中间玩家可能已经挪过）
+    p_stick = pose(s)
+    # 圆盘几何必须在按下之前按当时的画面尺寸重算：画布 boot 完还在一档一档长（无头实测会长到
+    # 1198x523 这种数），照开场那份算的圆心按下去就偏到圈外（第 6~13 遍全栽在这儿）。
+    尺2 = (wait_screen_stable(s) or [cw, ch])
+    cw, ch = int(尺2[0]), int(尺2[1])
+    半径 = int(min(cw * 0.13, ch * 0.17))
+    force = [int(cw * 0.19), ch - int(ch * 0.12) - 半径, 半径]
+    s.ev("window.__MCL_STICK_FORCE = [%d, %d, %d]; return 1;" % (force[0], force[1], force[2]))
+    实际圆3 = None
+    for _ in range(24):
+        time.sleep(0.12)
+        c0 = fed_circle(s)
+        if c0 and max(abs(c0[0] - force[0]), abs(c0[1] - force[1]), abs(c0[2] - force[2])) <= 4:
+            实际圆3 = c0
+            break
+    if 实际圆3 is None:
+        实际圆3 = fed_circle(s) or force
+    stick = [int(实际圆3[0]), int(实际圆3[1]), int(实际圆3[2])]
+    半3 = 实际圆3[2]
+    # 判据按下去的坐标，到游戏手里会被浏览器压过一道（实测：按 CSS (91,381) → 游戏收到
+    # (83,274)，y 压 0.72 倍 —— 画布 CSS 方块和游戏画面尺寸之间那层换算，判据猜了三轮全歪）。
+    # 现在不猜了：先读**游戏自己报的圆**，让胶水把它换算回"该按哪儿"，按下之后
+    # 再用 HUD 核对游戏真的落在圆心里没有；没落上就重来（最多三轮）。
+    按点 = None
+    落1 = None
+    圆心 = [stick[0], stick[1]]
+    半3 = 实际圆3[2]
+    kx = ky = 1.0
+    ox = oy = 0
+    # 按下点要按"实测偏差"迭代修正：浏览器会把触摸坐标压过一道（实测压 x0.912 / y0.719 倍 ——
+    # 手机屏幕上就是 devicePixelRatio 那一层，越高清的屏压得越狠）。第一版按换算口给的点按，
+    # 实测偏了多少，下一版就把这点补回去，一般第二、三轮就落准。
+    轨迹 = []
+    补x = 补y = 0
+    tid_s = tid
+    落1 = None
+    同帧 = []
+    for 轮 in range(5):
+        理想 = to_css(s, 圆心[0], 圆心[1]) or [stick[0], stick[1]]
+        按点 = [理想[0] + 补x, 理想[1] + 补y]
+        tid_s = tid; tid += 1
+        s.ev("window.__T.tstart(%d, %d, %d);" % (tid_s, 按点[0], 按点[1]))
+        落1 = None
+        同帧 = []
+        t_end = time.time() + 1.2
+        while time.time() < t_end:
+            f = one_frame(s, tid_s)
+            r = f.get("手指")
+            if r:
+                同帧.append((f.get("画面"), f.get("圆"), f.get("摇杆"), r))
+                cc = f.get("圆") or 实际圆3
+                圆心 = [cc[0], cc[1]]
+                半3 = cc[2]
+                if r[2] == "b":
+                    落1 = r
+                    break
+            time.sleep(0.06)
+        if 落1 is None and 同帧:
+            落1 = 同帧[0][3]
+        if not 落1:
+            s.ev("window.__T.tend(%d, %d, %d);" % (tid_s, 按点[0], 按点[1]))
+            time.sleep(0.15)
+            break
+        ox, oy = 落1[0] - 圆心[0], 落1[1] - 圆心[1]
+        轨迹.append((轮, 按点, 落1[:2], [ox, oy]))
+        if math.hypot(ox, oy) <= max(8, 半3 * 0.18):
+            # 落准了（离圆心不到半径的 18%），开拖。顺手把浏览器那道压缩量出来：
+            # 落点 = 按下点被压过的结果，两个一除就是倍率，拖和抬手都要用它换算回去。
+            kx = 落1[0] / max(1, 圆心[0])
+            ky = 落1[1] / max(1, 圆心[1])
+            kx = kx if 0.2 < kx < 5 else 1.0
+            ky = ky if 0.2 < ky < 5 else 1.0
+            break
+        # 这一轮没落准：这根手指必须收掉，不然它一直算"还按着"，
+        # 后面每条转向判据都会被它挡死（合成触摸不抬手就永远活着）。
+        s.ev("window.__T.tend(%d, %d, %d);" % (tid_s, 按点[0], 按点[1]))
+        time.sleep(0.15)
+        补x += int(-ox / max(0.05, kx))            # 把偏差搬回按下点（换算回 CSS 那一层）
+        补y += int(-oy / max(0.05, ky))
+    tid_keep = tid_s
+    按点末 = 按点
+    # 开拖之前重新对表：按下之后画布可能又长了一档（boot 完它还在长），起点就得跟着搬。
+    # 老版本这段把 x 加了两遍（一行残留算出来 nc[0]+按点末[0]），起点被推偏 99 像素、
+    # 拖成了斜线（实测事故：按点末 [198,488]、松手前手指停在离圆心 99 像素处）。
+    # 修法不猜：直接问"当前圆心"在 CSS 尺上是哪个点 —— 用胶水自己的换算口 to_css
+    # （同帧同尺），那个点就是拖动起点，tmove 过去游戏正好落在圆心上。
+    现圆 = fed_circle(s) or 实际圆3
+    if 现圆:
+        nc = to_css(s, 现圆[0], 现圆[1])
+        if nc:
+            按点末 = [int(nc[0]), int(nc[1])]
+    # 拖距按画布倍率（buffer/CSS）换算回 CSS 尺：无头这里倍率是 1，真机上是 devicePixelRatio。
+    # （老版用"落点÷圆心"估倍率：画布不一定在窗口原点，绝对坐标相除是假倍率。）
+    sy = 1.0
+    try:
+        比例 = s.ev("return (function(){var c=document.getElementById('glcanvas');"
+                    "if(!c||!c.getBoundingClientRect)return null;var r=c.getBoundingClientRect();"
+                    "if(!(r.height>0))return null;return (c.height||r.height)/r.height;})();")
+        if 比例 and 0.2 < float(比例) < 5:
+            sy = float(比例)
+    except Exception:
+        sy = 1.0
+    拖距 = -int(半3 * 0.85 / max(0.05, sy))   # CSS 尺上要拖这么远，游戏那边才正好收到 0.85 半径
+    # 朝前度拿按下前的 yaw 算，若拖动期间 yaw 被别的东西带歪，方向判据会冤死在上面：
+    # 拖前 yaw、按住 yaw、每一步 tmove 后的位姿+yaw 全部钉进证据里，一眼看穿。
+    拖前帧 = one_frame(s, tid_keep)
+    归属1 = None
+    for _ in range(20):        # 连拍归属：哪怕只有一帧认下过，也要抓下来
+        o = stick_owner(s)
+        if o is not None and o >= 0:
+            归属1 = o
+            break
+        time.sleep(0.05)
+    归属2 = []
+    拖动yaw = []
+    for k in range(1, 7):
+        s.ev("window.__T.tmove(%d, %d, %d);" % (
+            tid_keep, 按点末[0], 按点末[1] + 拖距 * k // 6))
+        o = stick_owner(s)
+        if o not in 归属2:
+            归属2.append(o)
+        q = pose(s)
+        if q:
+            拖动yaw.append((k, round(q[0], 2), round(q[2], 2), round(q[3], 3)))
+        time.sleep(0.05)
+    time.sleep(0.6)
+    p_moving = pose(s)
+    落2 = raw_touch(s, tid_keep)
+    按住帧 = one_frame(s, tid_keep)
+    s.ev("window.__T.tend(%d, %d, %d);" % (tid_keep, 按点末[0], 按点末[1] + 拖距))
+    # "停没停"不能只采一次：HUD 位姿 0.2 秒一推（Rust 侧写死的 hud_timer），读数最多落后一整拍。
+    # 松手那刻是满速 4.4 格/秒，0.2 秒的滞后本身就值 0.9 格"假漂移"—— 老版 0.5 的阈值就是这么
+    # 被误伤的（实测 0.67：松手后摇杆其实早已撒手，多出来的是滞后那 0.15 秒的满速位移）。
+    # 改成 0.2 秒采一次、连采 8 次看衰减：真停稳了，最后两帧几乎不动；摇杆真卡住，
+    # 任何相邻两帧都是 0.8 格以上（满速 × 0.2 秒）。
+    停轨迹 = []
+    for _ in range(8):
+        停轨迹.append(pose(s))
+        time.sleep(0.2)
+    p_stop = 停轨迹[-1]
+    末帧差 = None
+    try:
+        末帧差 = math.hypot(p_stop[0] - 停轨迹[-2][0], p_stop[2] - 停轨迹[-2][2])
+    except Exception:
+        pass
+    归属后 = []
+    for _ in range(10):        # 抬手之后摇杆该立刻撒手；还记着就是它把玩家一直推着走
+        o = stick_owner(s)
+        if o not in 归属后:
+            归属后.append(o)
+        time.sleep(0.08)
+    moved = walked = 0.0
+    froze = False
+    朝前 = None
+    try:
+        moved = math.hypot(p_moving[0] - p_stick[0], p_moving[2] - p_stick[2])
+        walked = math.hypot(p_stop[0] - p_stick[0], p_stop[2] - p_stick[2])
+        froze = 末帧差 is not None and 末帧差 < 0.3
+        # "推上方=前进"验方向：位移与当时朝向的水平前向 (sin yaw, cos yaw) 的点积得占大头
+        fwd = (math.sin(p_stick[3]), math.cos(p_stick[3]))
+        dvec = (p_moving[0] - p_stick[0], p_moving[2] - p_stick[2])
+        朝前 = (fwd[0] * dvec[0] + fwd[1] * dvec[1]) / max(1e-6, moved)
+    except Exception:
+        pass
+    # 证据怎么拼都不许把判据弄崩：这一段整段兜住，崩了就报"取证失败 + 当时有哪些数"。
+    try:
+        证据尺 = ("按下按在 CSS %s，游戏报的圆 %s；"
+                   "按下点在游戏那把尺上是 %s（偏移 %d,%d）；浏览器压缩比 x%.2f y%.2f；"
+                   "摇杆记着的手指：按下后 %s、拖动途中 %s（该是 %d 才算被摇杆认下）；"
+                   "同帧取样（画面/圆/摇杆/手指）%s；"
+                   "落点收敛轨迹（第几轮/按在哪儿/落在哪儿/偏多少）%s"
+                   % (_取(locals(), "按点末", 按点), _取(locals(), "实际圆3", 实际圆3), 落1,
+                      _取(locals(), "ox", 0), _取(locals(), "oy", 0),
+                      _取(locals(), "kx", 1.0), _取(locals(), "ky", 1.0),
+                      归属1, 归属2, tid_keep, 同帧[:2], 轨迹))
+    except Exception as e:
+        证据尺 = "取证这段自己崩了：%s: %s｜当时有：按点末=%s 落1=%s 圆心=%s 半3=%s 同帧=%s 轨迹=%s" % (
+            type(e).__name__, e, locals().get("按点末"), locals().get("落1"),
+            locals().get("圆心"), locals().get("半3"), locals().get("同帧"), 轨迹)
+    走路证据 = ("面板=%s；转前yaw=%.3f → 起点yaw=%.3f（前置转向：背后方向开放，见上方注释）；"
+                "按下前 (%.2f,%.2f) → 拖着时 (%.2f,%.2f) 位移 %.2f 格 → 松手 1.6 秒后 (%.2f,%.2f) 位移 %.2f 格；"
+                "朝前度 %.2f（位移·当前朝向前向/位移，>0.5 才算'推上方=前进'而不是斜着跑）；"
+                "松手后 0.2 秒×8 的轨迹 %s，末两帧差 %.2f 格（<0.3 算停干净：HUD 0.2 秒一推，"
+                "摇杆真卡住时每帧 0.8 格以上）；%s；拖着时游戏看到手指在 %s；松手后摇杆还记着 %s；"
+                "拖前帧yaw=%s 按住帧yaw=%s 拖动期间(k/位姿x/位姿z/yaw)=%s"
+                % (面板, yaw转前, p_stick[3], p_stick[0], p_stick[2], p_moving[0], p_moving[2], moved,
+                   p_stop[0], p_stop[2], walked,
+                   朝前 if 朝前 is not None else -1,
+                   [[round(q[0], 2), round(q[2], 2)] for q in 停轨迹 if q] if 停轨迹 else None,
+                   末帧差 if 末帧差 is not None else -1,
+                   证据尺, 落2, 归属后,
+                   拖前帧.get("yaw"), 按住帧.get("yaw"),
+                   拖动yaw))
+    log("手机端触摸", "拖摇杆要真往前走（按当前朝向算，推上方 = 前进），松手要真停下来",
+        bool(p_stick and p_moving) and moved > 2.0 and froze
+        and 朝前 is not None and 朝前 > 0.5, 走路证据)
+    # ---- 拖着突然卡住：抬手事件被吞以后，新按的那根得接管，而且不能猛抽视角 ----
+    y_a = yaw_of(s)
+    hold_move(tid, right[0], right[1], 70, 0, 300); stale_id = tid; tid += 1
+    y_b = yaw_of(s)
+    s.ev("window.__T.tend(%d, %d, %d);" % (stale_id, right[0] + 70, right[1]))  # 吞：发出去但游戏没收到
+    time.sleep(0.05)
+    s.ev("window.__T.tendGone(%d);" % stale_id)                                   # 真从屏上抹掉，不补帧
+    time.sleep(0.15)
+    y_c = yaw_of(s)
+    tid2 = hold_move(tid, right[0] + 320, right[1] - 250, -60, 0, 300); tid2_0 = tid; tid += 1
+    s.ev("window.__T.tend(%d, %d, %d);" % (tid2, right[0] + 320 - 60, right[1] - 250))
+    time.sleep(0.6)
+    y_d = yaw_of(s)
+    def 折(a, b):
+        d = (a - b) % (2.0 * math.pi)
+        return d - 2.0 * math.pi if d > math.pi else d
+    跳 = abs(折(y_c, y_b)) if (y_b is not None and y_c is not None) else None
+    接管后转了 = abs(折(y_d, y_c)) if (y_d is not None and y_c is not None) else None
+    该转 = 60.0 * math.pi / 420.0
+    过冲 = (接管后转了 / 该转) if (接管后转了 is not None and 该转 > 0) else None
+    log("手机端触摸", "记着的那根手指没了以后，还按着的新手指要直接接管转向（不用整根抬起重按）",
+        (接管后转了 or 0) > 0.05,
+        "拖 A 累计 %.4f 弧度；A 的抬手被吞后视角又自己挪了 %.4f 弧度（接管前不该有动作）；"
+        "从远处按下的 B 拖 60 像素转了 %.4f 弧度" % (
+            abs(折(y_b, y_a)) if (y_a is not None and y_b is not None) else -1,
+            跳 or 0, 接管后转了 or 0))
+    落点距 = math.hypot((right[0] + 320) - (right[0] + 70), (right[1] - 250) - right[1])
+    log("手机端触摸", "接管那一下不许猛抽视角：转向量只能由这次的拖动量解释（不能把旧按下点算进第一帧）",
+        (过冲 is not None and 过冲 < 1.8),
+        "B 拖 60 像素只该转 %.4f 弧度，实测 %.4f 弧度 = 应有值的 %.2f 倍（<1.8 过关）；"
+        "B 的按下点离 A 约 %.0f 像素 —— 要是接管时拿 B 按下时的旧点当起点，第一帧就会把这段算进去，"
+        "倍数会是 %.1f 倍左右；被吞那根抹掉后一帧内视角自己动了 %.4f 弧度"
+        % (该转, 接管后转了 or 0, 过冲 or 0, 落点距, (落点距 + 60.0) * math.pi / 420.0 / 该转, 跳 or 0))
 
     # 双击 = 飞行（旧版说明里写着、代码里没做）
     t0 = time.time()
@@ -1806,6 +2205,8 @@ def scene_static(u):
 
     RS, BK, PH, WK, MS, NZ = (src_of("main.rs"), src_of("blocks.rs"), src_of("phys.rs"),
                         src_of("world.rs"), src_of("mesh.rs"), src_of("noise.rs"))
+    LM = src_of("../game/web/loader.js")
+    CS = src_of("../game/web/game.css")
     uv_decl = (re.search(r"varying \\w+ vec2 uv", RS) or ["", "读不到 main.rs"])[0] if RS else "读不到 main.rs"
     checks = [
         ("IndexedDB 打开有超时", re.search(r"rejectFn[\s\S]{0,400}?setTimeout|setTimeout[\s\S]{0,300}?rejectFn", L) is not None),
@@ -1923,6 +2324,17 @@ def scene_static(u):
                               and "for y in 2..=hlim" in WK and "self.carve_caves();" in WK), ""),
         ("岩浆会发光，是洞穴深处的天然光源（不用玩家先进洞摆灯）",
          None if not BK else ("id == LAMP || id == LAVA" in BK and "pub const LAVA: u8 = 13" in BK), ""),
+        ("手机走路改用画出来的摇杆：命中按圆盘几何判，不再按『左半屏』那条看不见的线",
+         None if not RS else ("fn stick_contains" in RS and "bridge::stick_geo()" in RS
+                              and "let left = owned || stick_contains(scx, scy, sr, t.position);" in RS
+                              and "mcl_stick_geo" in RS), ""),
+        ("手机转向不再分左半屏右半屏：摇杆以外哪儿拖都转；接管时落点落在手指现在的位置（不猛抽）",
+         None if not (RS and LM) else ("live.contains(&l.id)" in RS
+                                       and "!g.look.iter().any(|k| k.id == l.id)" in RS
+                                       and "id: t.id,\n                        last: t.position" in RS
+                                       and "stickTouchTrack" in LM and "moveKnob" in LM
+                                       and "window.__MCL_STICK_FORCE" in LM
+                                       and "#stick-pad" in LM and "#stick-knob" in CS), ""),
         ("夜里天空是深夜蓝、不再发棕（上一版橙色到蓝色的带拉太长，钟面 20:12 还在橙那头）",
          None if not RS else ("(0.56, [0.035, 0.055, 0.13])" in RS
                               and "(0.84, [0.035, 0.055, 0.13])" in RS), ""),

@@ -530,6 +530,23 @@ function registerBridge() {
       env.mcl_free_look = function () {
         return lookFree ? 1 : 0;
       };
+      env.mcl_stick_geo = function (axis) {
+        window.__MCL_CALLS = (window.__MCL_CALLS || [0, 0]);
+        window.__MCL_CALLS[0] += 1;
+        var g = stickGeo();
+        var v = (axis === 1) ? stickCyRel(g) : (axis === 2 ? stickRRel(g) : stickCxRel(g));
+        if (axis === 0) {
+          window.__MCL_CALLS[1] = Math.round(v);
+          // 几何有了但盘还没接上（无头判据喂几何这条路）：现在就接，别等下一次 boot
+          if (!stickWired && g) wireStick();
+        }
+        return v;
+      };
+      env.mcl_in_hotbar = function (x, y) {
+        window.__MCL_CALLS = (window.__MCL_CALLS || [0, 0]);
+        window.__MCL_CALLS[0] += 1;
+        return inHotbar(x, y) ? 1 : 0;
+      };
     },
 
     on_init: function () {}
@@ -1095,6 +1112,9 @@ function forwardOutsideUp(ev) {
 // 按着鼠标的时候不推视角：那一下是要挖/放，手难免抖，不然每挖一对方位就跟着抖一下。
 var LOOK_SENS_PER_PX = Math.PI / 700; // 和以前按住拖动同一档：整屏 180° 约 700 像素
 var lookDx = 0, lookDy = 0, lookFree = false, lookLocked = false;
+// 手机摇杆：一个画出来的圆盘（左下）+ 一颗会跟手的珠子。Rust 那边每帧来问圆心和半径，
+// 屏幕其余地方全归转向 —— 不再有"左半屏/右半屏"那条看不见的线。
+var stickId = -1, stickCx = 0, stickCy = 0, stickR = 0;
 var lookLastX = 0, lookLastY = 0, lookHaveLast = false;
 
 function isTouchish() {
@@ -1102,6 +1122,172 @@ function isTouchish() {
   if ((navigator.maxTouchPoints || 0) > 0) return true;
   return !!(window.matchMedia && window.matchMedia('(any-pointer: coarse)').matches);
 }
+
+// ---- 手机摇杆的几何 / 珠子 ----
+// 摇杆的圆心半径都从那个 DOM 圆盘量出来（CSS 像素），和触摸坐标同一套尺，不用换算 devicePixelRatio。
+function ensureStick() {
+  if ($('stick-pad')) return;
+  var host = $('game-shell') || $('game-area') || document.body;
+  if (!host) return;
+  var pad = document.createElement('div');
+  pad.id = 'stick-pad';
+  var knob = document.createElement('div');
+  knob.id = 'stick-knob';
+  pad.appendChild(knob);
+  host.appendChild(pad);
+}
+
+// 圆盘 + 跟手珠子接好线（只接一次）。两条触发路：
+// 1) 真机：boot 时触屏能力可信，直接接 —— 那时圆盘刚建出来，Rust 下一帧就能量到几何；
+// 2) 无头/测试：触屏能力报不出来，等判据从外面喂进几何（__MCL_STICK_FORCE），
+//    Rust 第一次来问 mcl_stick_geo 就是信号，那时候再接。
+// 老版本只在 boot 时问一次"几何在不在"：真机上那时圆盘还没建、几何自然是空，
+// 圆盘就永远不出现（鸡生蛋）—— 真机上摇杆只能退回"左半屏"的老规矩，珠子也没有。
+var stickWired = false;
+function wireStick() {
+  if (stickWired) return;
+  stickWired = true;
+  ensureStick();
+  stickTouchTrack();
+  var sp = $('stick-pad');
+  if (sp) sp.hidden = false;
+}
+
+// 测试注入：无头判据环境报不出触屏能力（塞不进 window.Touch ✓ 见判据里的长注释），
+// 页面据此不会自己长出摇杆圆盘，于是判据把圆盘几何从外面喂进来，触摸用例才测得到真东西。
+// 注入的几何是**窗口/CSS 坐标**（和判据发触摸用的那套尺一致），交给 wasm 前必须换算成
+// 画布逻辑坐标：无头这儿窗口 420x760、macroquad 的屏幕却是 484x503，两套尺差着倍率，
+// 不换算的话判据按屏幕画的圆会整体偏一截，Rust 一看"手指在圈外"就不认摇杆了。
+var stickForce = null;
+function forcedGeo() {
+  return stickForce;
+}
+
+// 判据用的注入接口：按窗口/CSS 坐标报一个圆盘，内部换算成 wasm 那侧要的画布逻辑坐标。
+// 换算用的倍率取自 #glcanvas（CSS 尺寸 vs 缓冲尺寸），每帧重算 —— 转屏 / 改窗口大小都跟得上。
+function stickForceApply() {
+  var f = window.__MCL_STICK_FORCE;
+  if (!f || f.length !== 3 || !(f[2] > 0)) { stickForce = null; return; }
+  // 原样收下，不换算（上面那段注释：判据报的已经是画面坐标）
+  stickForce = { cx: f[0], cy: f[1], r: f[2] };
+}
+
+// 给判据回话用：Rust 每一帧真正拿到的那个圆。判据照这个数下手指，
+// 不用自己猜 macroquad 那把尺 —— 我按 CSS 猜过、按画布缓冲猜过，两轮都猜歪。
+
+
+function canvasScale() {
+  // CSS 像素 → 画布逻辑像素 的倍率。Rust 那侧收到的触摸是画布逻辑坐标（= clientX × 这个倍率，
+  // 和 macroquad 给鼠标的处理同一套），所以喂给它的圆盘几何也必须换算过去。
+  var c = $('glcanvas');
+  if (!c || !c.getBoundingClientRect) return [1, 1, 0, 0];
+  var cr = c.getBoundingClientRect();
+  if (!(cr.width > 0) || !(cr.height > 0)) return [1, 1, 0, 0];
+  return [(c.width || cr.width) / cr.width, (c.height || cr.height) / cr.height, cr.left, cr.top];
+}
+
+function stickGeo() {
+  stickForceApply();   // 每帧都重算注入的几何（画布尺寸可能刚变过）
+  var f = forcedGeo();
+  if (f) return f;
+  var pad = $('stick-pad');
+  if (!pad || !pad.getBoundingClientRect) return null;
+  var b = pad.getBoundingClientRect();
+  if (!(b.width > 0)) return null;
+  return { cx: b.left + b.width / 2, cy: b.top + b.height / 2, r: b.width / 2, css: true };
+}
+
+function toCanvasX(v) { var k = canvasScale(); return (v - k[2]) * k[0]; }
+function toCanvasY(v) { var k = canvasScale(); return (v - k[3]) * k[1]; }
+function stickCxRel(g) { return g ? (g.css ? toCanvasX(g.cx) : g.cx) : 0; }
+function stickCyRel(g) { return g ? (g.css ? toCanvasY(g.cy) : g.cy) : 0; }
+function stickRRel(g) { return g ? (g.css ? g.r * canvasScale()[0] : g.r) : 0; }
+
+// 这个画布坐标是不是压在底栏那块 DOM 上。底栏也是 DOM：手指点上去浏览器根本不会把
+// 触摸交给画布，所以这条主要是防"格子挨着摇杆、按下被摇杆抢走"那种边界情况。
+function inHotbar(x, y) {
+  var hb = $('hotbar') || $('hot-cells');
+  var c = $('glcanvas');
+  if (!hb || !c || !hb.getBoundingClientRect) return false;
+  var b = hb.getBoundingClientRect();
+  if (!(b.width > 0) || !(b.height > 0)) return false;
+  var cr = c.getBoundingClientRect();
+  if (!(cr.width > 0) || !(cr.height > 0)) return false;
+  // 画布逻辑尺寸和 CSS 尺寸对不上时（某些 devicePixelRatio 的处理）这套换算不可信：
+  // 宁可退回"没压着"，也别把摇杆判歪。
+  var ex = Math.abs(cr.width / (c.width || cr.width) - 1);
+  var ey = Math.abs(cr.height / (c.height || cr.height) - 1);
+  if (ex > 0.1 || ey > 0.1) return false;
+  var px = cr.left + x * (cr.width / (c.width || cr.width));
+  var py = cr.top + y * (cr.height / (c.height || cr.height));
+  return px >= b.left && px <= b.right && py >= b.top && py <= b.bottom;
+}
+
+function moveKnob(dx, dy) {
+  var k = $('stick-knob');
+  if (!k) return;
+  if (k.style.transform) k.style.transform = '';   // 每次从头写，免得两条路径互相留残值
+  if (dx === 0 && dy === 0) { k.style.left = '50%'; k.style.top = '50%'; return; }
+  if (typeof k.style.transform === 'string') {
+    k.style.left = '50%'; k.style.top = '50%';
+    k.style.transform = 'translate(calc(-50% + ' + dx + 'px), calc(-50% + ' + dy + 'px))';
+  } else {
+    k.style.left = 'calc(50% + ' + dx + 'px)';
+    k.style.top = 'calc(50% + ' + dy + 'px)';
+  }
+}
+
+// 珠子跟手：直接用触摸事件推（不依赖 wasm 那侧的帧循环），按在盘上就跟着手指走、
+// 出了盘就停在圈边；抬手回中心。
+function stickTouchTrack() {
+  if (!window.addEventListener) return;
+  var h = function (ev) {
+    var list = (ev.touches && ev.touches.length) ? ev.touches : (ev.changedTouches || []);
+    var g = stickGeo();
+    if (!g) return;
+    var i, t, hit = null;
+    for (i = 0; i < list.length; i++) {
+      t = list[i];
+      var dx = t.clientX - g.cx, dy = t.clientY - g.cy;
+      if (Math.sqrt(dx * dx + dy * dy) <= g.r * 1.7 && (hit === null || t.identifier === stickId)) {
+        if (hit === null || t.identifier === stickId) hit = t;
+      }
+    }
+    if (!hit) { moveKnob(0, 0); return; }
+    if (stickId < 0 || hit.identifier !== stickId) { stickId = hit.identifier; }
+    var mx = hit.clientX - g.cx, my = hit.clientY - g.cy;
+    var len = Math.sqrt(mx * mx + my * my);
+    var cap = g.r;
+    if (len > cap) { mx = mx * cap / len; my = my * cap / len; }
+    moveKnob(Math.round(mx), Math.round(my));
+  };
+  var end = function () { stickId = -1; moveKnob(0, 0); };
+  window.addEventListener('touchstart', h, false);
+  window.addEventListener('touchmove', h, false);
+  window.addEventListener('touchend', end, false);
+  window.addEventListener('touchcancel', end, false);
+}
+
+// 给判据回话用的查询口（放在顶层：stickTouchTrack 只在圆盘存在时才跑，
+// 无头判据环境里圆盘不存在，写在那里面就永远不会被创建）。
+// 返回 Rust 每一帧真正拿到的那个圆 —— 判据照这个数下手指，不用自己猜 macroquad 那把尺。
+window.__MCL_STICK_GEO = function () {
+  stickForceApply();
+  var g = stickGeo();
+  if (!g) return null;
+  return [Math.round(stickCxRel(g)), Math.round(stickCyRel(g)), Math.round(stickRRel(g))];
+};
+
+// 画布逻辑坐标 → 窗口/CSS 坐标（判据发触摸用的那套尺）。判据先读 Rust 报的圆，
+// 再照这个圆算出"要按在哪儿游戏才落在圆心上"，全靠这两个口子对上尺。
+window.__MCL_TO_CSS_X = function (v) {
+  var k = canvasScale();
+  return k[0] > 0 ? (v / k[0] + k[2]) : v;
+};
+window.__MCL_TO_CSS_Y = function (v) {
+  var k = canvasScale();
+  return k[1] > 0 ? (v / k[1] + k[3]) : v;
+};
 
 function canvasHasCursor(ev) {
   var c = $('glcanvas');
@@ -1343,7 +1529,14 @@ function watchBoot() {
     // 触屏判据别只盯 ontouchstart：带触屏的笔记本、平板、一些国产 WebView 要么压根没这个属性、
     // 要么它有但不能用。(any-pointer: coarse) 更实在 —— 真能用手指头点的设备才叫 coarse。
     var touchish = isTouchish();
-    lookFree = !touchish;   // 桌面才走「移动鼠标就转向」；触屏走右半屏拖动
+    lookFree = !touchish;   // 桌面才走「移动鼠标就转向」；触屏走摇杆 + 其余地方转向
+
+    // 手机端把摇杆显出来（桌面不显：桌面走路是 WASD，凭空多一个圆盘碍事）
+    // 真机按触屏能力判（boot 这一刻它可信）：当场建盘接线，Rust 下一帧就能量到几何。
+    // 无头测试那条路（触屏能力报不出来）等判据喂进几何，由 mcl_stick_geo 第一次被调时接线。
+    if (touchish) {
+      wireStick();
+    }
 
     // 桌面：把鼠标"锁"进画布（Pointer Lock）。锁上以后光标看不见、也不会跑出画布外，
     // 而且浏览器照样一直送 mousemove —— 以前光标划到画布外面视角就转不动了，这半条老毛病
