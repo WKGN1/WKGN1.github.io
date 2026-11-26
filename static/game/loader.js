@@ -456,6 +456,106 @@ function decodeBytes(ptr, len) {
   try { return decodeURIComponent(escape(parts.join(''))); } catch (e2) { return parts.join(''); }
 }
 
+// ---------------------------------------------------------------------------
+// 音效：全部 WebAudio 现场合成，项目里没有**一个**音频文件（参考 OpusMC 的做法：
+// 噪音走带通/低通滤波，闷响是快速下滑的正弦）。Rust 在事件发生的那一帧调
+// mcl_sound(id, mat)，id：1 碎块 2 放块 3 脚步 4 挖掘一下 5 落水 6 拾取 7 落地，
+// mat 是 b::sound_class 的材质桶（0 石 1 木 2 土 3 叶 4 水）。
+// 同一材质每次加一点音高抖动，不然听起来像机关枪。
+// ---------------------------------------------------------------------------
+var Sfx = {
+  ctx: null,
+  master: null,
+  stepAlt: 0,
+  ensure: function () {
+    if (this.ctx) return this.ctx;
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    var ctx = null;
+    try { ctx = new AC(); } catch (e) { return null; }
+    this.ctx = ctx;
+    this.master = ctx.createGain();
+    this.master.gain.value = 0.22;
+    this.master.connect(ctx.destination);
+    return ctx;
+  },
+  // 白噪声 + 滤波 + 指数衰减：破碎、沙沙、脚步这类「嘶」的声音
+  noise: function (dur, freq, q, vol, type) {
+    var ctx = this.ctx;
+    var len = Math.max(16, Math.floor(ctx.sampleRate * dur));
+    var buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    var d = buf.getChannelData(0), i;
+    for (i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    var src = ctx.createBufferSource();
+    src.buffer = buf;
+    var f = ctx.createBiquadFilter();
+    f.type = type || 'bandpass';
+    f.frequency.value = freq;
+    f.Q.value = q;
+    var g = ctx.createGain();
+    var t = ctx.currentTime;
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    src.connect(f); f.connect(g); g.connect(this.master);
+    src.start(t);
+    src.stop(t + dur);
+  },
+  // 带音高下滑的振荡器：闷响、落地、拾取这类「咚」「啵」
+  tone: function (f0, f1, dur, vol, type) {
+    var ctx = this.ctx;
+    var o = ctx.createOscillator();
+    o.type = type || 'sine';
+    var t = ctx.currentTime;
+    o.frequency.setValueAtTime(f0, t);
+    if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g); g.connect(this.master);
+    o.start(t);
+    o.stop(t + dur);
+  },
+  play: function (id, mat) {
+    var ctx = this.ensure();
+    // 事件日志：无头判据靠它验证「该响的时候真的响了」（ring，留最近 64 条）
+    window.__MCL_SND = window.__MCL_SND || [];
+    window.__MCL_SND.push([(id | 0), (mat | 0)]);
+    if (window.__MCL_SND.length > 64) window.__MCL_SND.shift();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') { try { ctx.resume(); } catch (e) {} }
+    var m = mat | 0, j = 0.9 + Math.random() * 0.2;
+    switch (id | 0) {
+      case 1: // 碎块
+        if (m === 0) { this.noise(0.16, 900 * j, 1.2, 0.5); this.tone(140 * j, 60, 0.12, 0.5); }
+        else if (m === 1) { this.tone(110 * j, 55, 0.16, 0.6); this.noise(0.1, 500 * j, 0.8, 0.3); }
+        else if (m === 3) { this.noise(0.12, 2400 * j, 0.7, 0.35); }
+        else { this.noise(0.14, 700 * j, 0.9, 0.45); this.tone(90 * j, 45, 0.1, 0.35); }
+        break;
+      case 2: // 放块（比碎块闷一点）
+        this.tone(m === 1 ? 95 * j : m === 0 ? 120 * j : 80 * j, 45, 0.12, 0.5);
+        this.noise(0.06, 600, 0.8, 0.2);
+        break;
+      case 3: // 脚步：左右脚音高错开一点
+        this.stepAlt = 1 - this.stepAlt;
+        this.noise(0.05, (m === 0 ? 500 : m === 1 ? 380 : 450) * (this.stepAlt ? 1 : 0.92), 0.6, 0.16);
+        break;
+      case 4: // 挖掘一下（短促的刮）
+        this.noise(0.05, (m === 0 ? 1600 : m === 1 ? 900 : 1200) * j, 1.5, 0.3);
+        break;
+      case 5: // 落水
+        this.noise(0.4, 800, 0.4, 0.4, 'lowpass');
+        break;
+      case 6: // 拾取
+        this.tone(420, 720, 0.07, 0.25, 'triangle');
+        break;
+      case 7: // 落地
+        this.noise(0.18, 300, 0.5, 0.5, 'lowpass');
+        this.tone(70, 40, 0.15, 0.5);
+        break;
+    }
+  }
+};
+
 function registerBridge() {
   if (typeof window.miniquad_add_plugin !== 'function') return;
 
@@ -580,6 +680,8 @@ function registerBridge() {
         window.__MCL_CALLS[0] += 1;
         return inHotbar(x, y) ? 1 : 0;
       };
+      // 音效事件（Sfx 在上面）。id 和 mat 的分工见 Sfx 头注释。
+      env.mcl_sound = function (id, mat) { Sfx.play(id, mat); };
     },
 
     on_init: function () {}

@@ -117,6 +117,9 @@ pub extern "C" fn mcl_bridge_crate_version() -> u32 {
 #[link(wasm_import_module = "env")]
 extern "C" {
     fn mcl_stick_geo(axis: u32) -> f32;
+    /// 音效事件：id 见 bridge::sound，mat 是 blocks::sound_class 的材质类。
+    /// 事件发生的那一帧直接喊，不走 0.2 秒一次的 HUD 通道（脚步慢了 0.2 秒就出戏了）。
+    fn mcl_sound(id: u32, mat: u32);
 }
 
 mod bridge {
@@ -132,6 +135,20 @@ mod bridge {
         #[cfg(not(target_arch = "wasm32"))]
         {
             (0.0, 0.0, 0.0)
+        }
+    }
+
+    /// 一个音效事件，配方全在 loader.js 的 Sfx 里（WebAudio 现场合成，没有一个音频文件）。
+    /// id：1 碎块 2 放块 3 脚步 4 挖掘一下 5 落水 6 拾取 7 落地；mat = b::sound_class(方块)。
+    #[inline]
+    pub fn sound(id: u32, mat: u32) {
+        #[cfg(target_arch = "wasm32")]
+        unsafe {
+            mcl_sound(id, mat);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (id, mat); // 单测不需要听见声音
         }
     }
 
@@ -648,6 +665,13 @@ struct Game {
     /// 距离「这进度该作废了」还剩几秒。
     mine_clock: f32,
     water_clock: f32,
+    /// 音效的帧间记忆：上一帧在水里吗 / 站在地上吗（进出水、落地靠状态翻转判）。
+    snd_in_water: bool,
+    snd_on_ground: bool,
+    /// 这趟腾空里最低的下落速度（负值）。落地响不响、多响看它。
+    snd_air_vel: f32,
+    /// 脚步按**距离**不按时间：攒够 1.3 块走一步，疾跑自然变密、潜行变疏。
+    snd_step_dist: f32,
     time_of_day: f32,
     phase: Phase,
     chunks: Vec<Option<Mesh>>,
@@ -706,6 +730,10 @@ impl Game {
             mine_total: 0,
             mine_clock: 0.0,
             water_clock: 0.0,
+            snd_in_water: false,
+            snd_on_ground: true,
+            snd_air_vel: 0.0,
+            snd_step_dist: 0.0,
         }
     }
 
@@ -807,6 +835,7 @@ impl Game {
         self.mine = Some(([x, y, z], left - 1));
         self.mine_total = total;
         self.mine_clock = MINE_RESET_SECONDS;
+        bridge::sound(4, b::sound_class(id)); // 每一下都响：手机点按挖掘全靠这个反馈
     }
 
     /// 真把这一格清掉：清成空气、标脏（在 world.set 里）、生存掉料、进度抹平。
@@ -818,9 +847,17 @@ impl Game {
         // （半径 15 = 光的射程）release 下实测 2 毫秒，不卡手。
         self.world.relight_around(x, y, z);
         self.save_dirty = true;
+        bridge::sound(1, b::sound_class(id)); // 碎块：材质决定是脆响还是闷响
         // 生存才掉料。创造挖了就是挖了，背包里那些格子永远是 0 个。
-        if !self.creative && self.inv.add(id, 1) > 0 {
-            self.set_note("背包满了，掉出来的没接住", NOTE_SECONDS);
+        if !self.creative {
+            // add 返回没装下的余数：0 = 接住了（响一声），>0 = 背包满了
+            let dropped = self.inv.add(id, 1);
+            if dropped == 0 {
+                bridge::sound(6, 0); // 拾取：短促上挑的「啵」
+            }
+            if dropped > 0 {
+                self.set_note("背包满了，掉出来的没接住", NOTE_SECONDS);
+            }
         }
     }
 
@@ -859,6 +896,50 @@ impl Game {
         // 放下方块同样要重算光照（它挡光，也可能自己发光）
         self.world.relight_around(cell[0], cell[1], cell[2]);
         self.save_dirty = true;
+        bridge::sound(2, b::sound_class(id)); // 放块：比碎块闷一点
+    }
+
+    /// 每帧一次的音效事件：拿物理前后的状态翻转判入水/落地，脚步按距离攒。
+    /// 必须在 player.update 之后调（用的都是它刚写进去的新状态）。
+    fn play_frame_sounds(&mut self, dt: f32) {
+        let p = &self.player;
+        if p.in_water && !self.snd_in_water {
+            bridge::sound(5, 4); // 入水：泼
+        }
+        self.snd_in_water = p.in_water;
+
+        if p.on_ground {
+            if !self.snd_on_ground && self.snd_air_vel < -11.0 {
+                // 落地：下落够快（约 2.5 块以上）才响；轻轻落地不该有声音
+                bridge::sound(7, 0);
+            }
+            let h_speed = (p.vel[0] * p.vel[0] + p.vel[2] * p.vel[2]).sqrt();
+            if !p.fly && !p.in_water && !p.sneak && h_speed > 1.2 {
+                self.snd_step_dist += h_speed * dt;
+                if self.snd_step_dist >= 1.3 {
+                    self.snd_step_dist -= 1.3;
+                    // 脚步音色由**脚下那块**决定
+                    let gx = p.pos[0].floor() as i32;
+                    let gy = (p.pos[1] - 0.05).floor() as i32;
+                    let gz = p.pos[2].floor() as i32;
+                    let id = if world::in_bounds(gx, gy, gz) {
+                        self.world.get(gx, gy, gz)
+                    } else {
+                        b::GRASS
+                    };
+                    bridge::sound(3, b::sound_class(id));
+                }
+            } else {
+                self.snd_step_dist = 0.0;
+            }
+            self.snd_air_vel = 0.0;
+        } else {
+            self.snd_step_dist = 0.0;
+            if p.vel[1] < self.snd_air_vel {
+                self.snd_air_vel = p.vel[1];
+            }
+        }
+        self.snd_on_ground = p.on_ground;
     }
 
     fn pick_target(&self) -> Option<([i32; 3], [i32; 3])> {
@@ -1659,6 +1740,8 @@ async fn main() {
             game.time_of_day = (game.time_of_day + dt / DAY_SECONDS).rem_euclid(1.0);
             game.player
                 .update(&game.world, dt, wish, jump, descend, sprint, sneak);
+            // 入水/落地/脚步：全靠物理前后的状态翻转，紧跟在 update 后面判
+            game.play_frame_sounds(dt);
 
             // 挖掘进度：一会儿不点同一格就作废
             if game.mine.is_some() {

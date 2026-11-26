@@ -802,6 +802,46 @@ def scene_base(u):
         and ls_legacy.get("len") == 40000,
         json.dumps(ls_legacy, ensure_ascii=False)[:120])
 
+    # ── 音效：全 WebAudio 现场合成，项目里没有一个音频文件 ──
+    # 无头里听不见：Rust 在事件发生的那一帧喊 mcl_sound(id, mat)，JS 记进
+    # __MCL_SND，判据查「该响的时候响了没有」。id：1 碎块 2 放块 3 脚步 4 挖掘一下
+    # 5 落水 6 拾取 7 落地。
+    # 出生点准星指着高地边缘那块 (56,19,41)（6.27 块，贴着 REACH 6.5 的边）：
+    # 它挖掉之后射线就落进空档、后面没有目标了 —— 所以顺序必须是「先放、再挖」：
+    # 右键先把一块放进它前面的空档，左键挖掉刚放的那块（又回到空地），再左键挖真目标。
+    s.ev("window.__MCL_SND = [];")
+    n_snd2 = changed_count(s)
+    click(s, W // 2, H // 2, 2)      # 放：目标面在高地边缘块上，放它前面的空档
+    time.sleep(0.7)
+    n_snd3 = changed_count(s)
+    snd_place = [e for e in (s.ev("return window.__MCL_SND || [];") or []) if e and e[0] == 2]
+    log("音效", "放方块真的响了放块音", n_snd3 > n_snd2 and len(snd_place) >= 1,
+        "改动 %d → %d｜放块音事件 %s" % (n_snd2, n_snd3, snd_place[:2]))
+    click(s, W // 2, H // 2, 0)      # 挖掉刚放的那块：准星现在先碰到它
+    time.sleep(0.7)
+    s.ev("window.__MCL_SND = [];")
+    n_snd0 = changed_count(s)
+    click(s, W // 2, H // 2, 0)      # 再挖：这回碰到的是高地边缘那块
+    time.sleep(0.7)
+    n_snd1 = changed_count(s)
+    snd_break = [e for e in (s.ev("return window.__MCL_SND || [];") or []) if e and e[0] == 1]
+    log("音效", "方块碎了真的响了碎块音（音色按材质分桶）", n_snd1 > n_snd0 and len(snd_break) >= 1,
+        "改动 %d → %d｜碎块音事件 %s" % (n_snd0, n_snd1, snd_break[:2]))
+    s.ev("window.__MCL_SND = [];")
+    s.ev("window.__T.keydown('KeyS','s');")
+    time.sleep(2.0)                  # 往后走 2 秒：实测约 9 块、掉两格、4-5 步
+    s.ev("window.__T.keyup('KeyS','s');")
+    time.sleep(0.5)
+    snd_step = [e for e in (s.ev("return window.__MCL_SND || [];") or []) if e and e[0] == 3]
+    log("音效", "走路有脚步声、密度合理（按距离走：1.3 块一步，踩空/撞墙会清零重攒）",
+        2 <= len(snd_step) <= 14,
+        "走 2 秒出了 %d 个脚步事件 %s" % (len(snd_step), snd_step[:4]))
+    # 走完玩家已经离出生点六块远了（后面还有掉一格）：重新开机把人送回出生点。
+    # 存档 3 秒一轮，上面走完 2 秒、再等 1.5 秒，挖 B 那一刀的存档必然已落地。
+    # 回来后的状态和基线一致：出生点位姿 + 世界差一格（B 被挖）—— 正是存档段之后的样子。
+    time.sleep(1.5)
+    fresh_boot(s, u, 0)
+
     # ── 交互：接下来要动视角了，这些用例只在同一个会话里比 ──
     if not wait_boot(s, 5):
         log("桌面基础", "清档之后没能继续在跑，交互用例跳过", False)
@@ -2398,6 +2438,24 @@ def scene_static(u):
         ("AO 和光照共用同一张邻居表（不会出现阴影一套位置、光照另一套位置）",
          None if not MS else ("fn corner_neighbours" in MS and "fn corner_light" in MS
                               and "corner_neighbours(cell, face, corner)" in MS), ""),
+        ("音效走即时桥：Rust 事件帧直接喊 mcl_sound，不走 0.2 秒的 HUD 通道",
+         None if not RS else ("fn mcl_sound(id: u32, mat: u32);" in RS
+                              and "fn sound(id: u32, mat: u32)" in RS
+                              and "fn play_frame_sounds" in RS
+                              and "bridge::sound(1, b::sound_class(id))" in RS
+                              and "bridge::sound(2, b::sound_class(id))" in RS), ""),
+        ("脚步声按距离攒（1.3 块一步）且看脚下材质，不按时间拍",
+         None if not RS else ("snd_step_dist >= 1.3" in RS
+                              and "p.pos[1] - 0.05" in RS
+                              and "bridge::sound(3, b::sound_class(id))" in RS), ""),
+        ("音效合成器在 JS 侧：WebAudio 现场合成、没有音频文件、事件有日志（判据入口）",
+         None if not LM else ("var Sfx" in LM and "createBiquadFilter" in LM
+                              and "env.mcl_sound" in LM
+                              and "window.__MCL_SND" in LM
+                              and "case 5:" in LM and "case 7:" in LM), ""),
+        ("材质分桶在 blocks.rs：同一桶共用一个音色",
+         None if not BK else ("pub fn sound_class" in BK
+                              and "GRASS | SNOW_GRASS | DIRT | SAND | SNOW" in BK), ""),
     ]
     for item in checks:
         log("静态检查", item[0], item[1], item[2] if len(item) > 2 else "")
