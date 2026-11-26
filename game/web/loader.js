@@ -255,8 +255,12 @@ function idbDelete() {
   return openDb().then(function (db) { return runWrite(db, function (store) { store.delete(KEY); }); });
 }
 
+// 分块大小必须是 3 的倍数：块不是 3 的整数倍时 btoa 会在那个块末尾补 '='，拼起来
+// 之后 '=' 落在字符串**中间** —— 严格的 atob 直接抛错，宽松的 atob 每处中缝填充
+// 多解出一个 0x00 字节（实测 38345 字节的存档读回 38346，RLE 流错位、坏档降级）。
+// 8190 的完整块不带任何填充，'=' 只可能出现在整串末尾。
 function b64encode(u8) {
-  var CH = 8192, parts = [], i;
+  var CH = 8190, parts = [], i;
   for (i = 0; i < u8.length; i += CH) {
     var slice = u8.subarray(i, Math.min(i + CH, u8.length));
     var s = '';
@@ -267,9 +271,29 @@ function b64encode(u8) {
 }
 
 function b64decode(str) {
-  var bin = atob(str), out = new Uint8Array(bin.length);
-  for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+  // 旧版编码（CH=8192）把中缝块的 '=' 留在了字符串中间。一个**非末组**却以 '='
+  // 结尾的 4 字符组其实只承载 2 个字节（第 3 字节是填充位展开的 0）。新写法的串
+  // 除了末尾最多两个 '=' 之外没有别的，直接 atob；有旧串就按组修回来 —— 这样
+  // 老设备已经写坏的兜底档也能救。
+  var eq = str.indexOf('=');
+  if (eq < 0 || eq >= str.length - 2) {
+    var bin = atob(str), out = new Uint8Array(bin.length);
+    for (var k = 0; k < bin.length; k++) out[k] = bin.charCodeAt(k);
+    return out;
+  }
+  var vals = [], i, g;
+  for (i = 0; i < str.length; i += 4) {
+    g = str.slice(i, i + 4);
+    if (g.charAt(3) === '=' && i + 4 < str.length) {
+      var b = atob(g.slice(0, 3) + 'A');   // 三个数据字符按 3 字节解，第 3 字节全填充位，丢弃
+      vals.push(b.charCodeAt(0), b.charCodeAt(1));
+    } else {
+      var b2 = atob(g);
+      var take = g.charAt(2) === '=' ? 1 : (g.charAt(3) === '=' ? 2 : 3);
+      for (var j = 0; j < take; j++) vals.push(b2.charCodeAt(j));
+    }
+  }
+  return new Uint8Array(vals);
 }
 
 function lsWrite(u8) {
@@ -286,6 +310,15 @@ function lsRead() {
 function lsClear() {
   try { localStorage.removeItem(LS_KEY); } catch (e) {}
 }
+
+// 回归钩子：localStorage 兜底那条路的读写入口（游戏主路径是 IDB，无头里也正常，
+// 判据没法自然走到兜底 —— 和 __MCL_STICK_FORCE 一个性质，不是游戏功能）。
+window.__MCL_LS = {
+  write: function (u8) { return lsWrite(u8 instanceof Uint8Array ? u8 : new Uint8Array(u8)); },
+  read: function () { return lsRead(); },
+  clear: function () { lsClear(); },
+  key: LS_KEY
+};
 
 // Rust 靠 save_ready 决定要不要等；等它真开口问之后才开始算「等太久」，
 // 这样「用户在门面上磨蹭了半分钟才点开玩」不会被误判成读档超时。

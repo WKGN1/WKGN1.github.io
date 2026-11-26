@@ -745,6 +745,63 @@ def scene_base(u):
     errs = s.ev("return window.__T.errs();")
     log("清档", "整条存档往返没有报错", not errs, "｜".join(errs[:3])[:160])
 
+    # ── localStorage 兜底那条路：分块 b64 的编码/解码必须无损 ──
+    # 主路径是 IDB（无头里也好好的），兜底只有 IDB 挂了才走，判据没法自然踩到 ——
+    # 所以走 __MCL_LS 钩子直接压这条编码链。旧版按 8192 分块，中缝留下 '=' 填充：
+    # 宽松的 atob 多解出 0x00（38345 字节读回 38346，RLE 错位），严格的 atob 直接抛
+    # （lsRead 吞掉异常返回 null，存档静默丢）。40000 字节跨 5 个块，两条路都压得到。
+    ls_big = [((i + 1) * 2654435761) & 0xFFFFFFFF % 256 for i in range(40000)]
+    s.ev("window.__LS_TEST = %s;" % json.dumps(ls_big))
+    ls_new = s.ev("""return (function(){
+      var r = window.__MCL_LS; if (!r) return {err: 'no hook'};
+      var src = window.__LS_TEST;
+      r.write(new Uint8Array(src));
+      var raw = localStorage.getItem(r.key);
+      r.clear();
+      var eq = raw.indexOf('=');
+      return {midpad: (eq >= 0 && eq < raw.length - 2) ? 1 : 0, rawlen: raw.length};
+    })()""")
+    ls_back = s.ev("""return (function(){
+      var r = window.__MCL_LS; if (!r) return {err: 'no hook'};
+      var src = window.__LS_TEST;
+      r.write(new Uint8Array(src));
+      var got = r.read(); r.clear();
+      if (!got) return {err: 'read null'};
+      if (got.length !== src.length) return {len: got.length, want: src.length};
+      var bad = 0; for (var i = 0; i < src.length; i++) if (got[i] !== src[i]) bad++;
+      return {len: got.length, bad: bad};
+    })()""")
+    # 旧格式（CH=8192）现场仿一份写进 localStorage，新解码得把它修回原样
+    ls_legacy = s.ev("""return (function(){
+      var r = window.__MCL_LS; if (!r) return {err: 'no hook'};
+      var src = window.__LS_TEST;
+      var CH = 8192, parts = [];
+      for (var i = 0; i < src.length; i += CH) {
+        var s2 = '';
+        for (var j = i; j < Math.min(i + CH, src.length); j++) s2 += String.fromCharCode(src[j]);
+        parts.push(btoa(s2));
+      }
+      localStorage.setItem(r.key, parts.join(''));
+      var got; try { got = r.read(); } catch (e) { got = null; }
+      r.clear();
+      if (!got) return {err: 'read null（旧串没救回来）'};
+      if (got.length !== src.length) return {len: got.length, want: src.length};
+      var bad = 0; for (var k = 0; k < src.length; k++) if (got[k] !== src[k]) bad++;
+      return {len: got.length, bad: bad};
+    })()""")
+    s.ev("delete window.__LS_TEST;")
+    log("存档", "localStorage 兜底的 b64 编码没有中缝填充（'=' 只许在整串末尾）",
+        isinstance(ls_new, dict) and "err" not in ls_new and ls_new.get("midpad") == 0,
+        json.dumps(ls_new, ensure_ascii=False)[:120])
+    log("存档", "localStorage 兜底 40000 字节往返无损（旧版这里会多字节/丢档，RLE 错位）",
+        isinstance(ls_back, dict) and "err" not in ls_back and ls_back.get("bad") == 0
+        and ls_back.get("len") == 40000,
+        json.dumps(ls_back, ensure_ascii=False)[:120])
+    log("存档", "旧版分块（CH=8192）写坏的兜底档能被新解码修回原样",
+        isinstance(ls_legacy, dict) and "err" not in ls_legacy and ls_legacy.get("bad") == 0
+        and ls_legacy.get("len") == 40000,
+        json.dumps(ls_legacy, ensure_ascii=False)[:120])
+
     # ── 交互：接下来要动视角了，这些用例只在同一个会话里比 ──
     if not wait_boot(s, 5):
         log("桌面基础", "清档之后没能继续在跑，交互用例跳过", False)
